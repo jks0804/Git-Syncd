@@ -8,6 +8,7 @@ import stat
 import hmac
 import hashlib
 import secrets
+import json
 from datetime import datetime
 from functools import wraps
 from flask import Flask, request, jsonify, send_from_directory, session, redirect
@@ -58,6 +59,7 @@ def init_db():
             source_branch TEXT NOT NULL DEFAULT 'main',
             dest_url TEXT NOT NULL,
             dest_branch TEXT NOT NULL DEFAULT 'main',
+            branches TEXT,
             schedule TEXT,
             ssh_key TEXT,
             git_username TEXT,
@@ -84,6 +86,7 @@ def init_db():
         ("git_username", "TEXT"),
         ("git_password", "TEXT"),
         ("webhook_secret", "TEXT"),
+        ("branches", "TEXT"),
         ("trigger", "TEXT NOT NULL DEFAULT 'manual'"),
     ]:
         try:
@@ -148,6 +151,98 @@ def embed_credentials(url, username, password):
     return url
 
 
+def _sync_branch_pair(src_branch, dst_branch, src_url, dst_url, git_env, work_dir, config, trigger, started_at, output_lines):
+    """Sync one branch pair. Returns True on success, False on error."""
+    sep = "─" * 50
+    output_lines.append(f"\n{sep}")
+    output_lines.append(f"[{datetime.utcnow().isoformat()}] Branch: {src_branch} → {dst_branch}")
+    output_lines.append(sep)
+
+    pair_dir = tempfile.mkdtemp(dir=work_dir, prefix=f"branch_{src_branch}_")
+    source_dir = os.path.join(pair_dir, "source")
+    dest_dir = os.path.join(pair_dir, "dest")
+
+    output_lines.append(f"[{datetime.utcnow().isoformat()}] Cloning source branch '{src_branch}'...")
+    result = subprocess.run(
+        ["git", "clone", "--branch", src_branch, "--depth", "1", src_url, source_dir],
+        capture_output=True, text=True, timeout=120, env=git_env,
+    )
+    output_lines.append((result.stdout + result.stderr).strip())
+    if result.returncode != 0:
+        output_lines.append(f"ERROR: Clone source branch '{src_branch}' failed.")
+        return False
+
+    output_lines.append(f"[{datetime.utcnow().isoformat()}] Cloning destination branch '{dst_branch}'...")
+    dest_result = subprocess.run(
+        ["git", "clone", "--branch", dst_branch, dst_url, dest_dir],
+        capture_output=True, text=True, timeout=120, env=git_env,
+    )
+    if dest_result.returncode != 0:
+        output_lines.append(f"Destination branch '{dst_branch}' not found — cloning default branch...")
+        dest_result2 = subprocess.run(
+            ["git", "clone", dst_url, dest_dir],
+            capture_output=True, text=True, timeout=120, env=git_env,
+        )
+        output_lines.append((dest_result2.stdout + dest_result2.stderr).strip())
+        if dest_result2.returncode != 0:
+            output_lines.append(f"ERROR: Clone destination failed.")
+            return False
+    else:
+        output_lines.append((dest_result.stdout + dest_result.stderr).strip())
+
+    output_lines.append(f"[{datetime.utcnow().isoformat()}] Syncing files...")
+    for item in os.listdir(dest_dir):
+        if item == ".git":
+            continue
+        full_path = os.path.join(dest_dir, item)
+        if os.path.isdir(full_path):
+            shutil.rmtree(full_path)
+        else:
+            os.remove(full_path)
+
+    for item in os.listdir(source_dir):
+        if item == ".git":
+            continue
+        src_path = os.path.join(source_dir, item)
+        dst_path = os.path.join(dest_dir, item)
+        if os.path.isdir(src_path):
+            shutil.copytree(src_path, dst_path)
+        else:
+            shutil.copy2(src_path, dst_path)
+
+    git_status = subprocess.run(
+        ["git", "status", "--porcelain"], capture_output=True, text=True, cwd=dest_dir,
+    )
+    if not git_status.stdout.strip():
+        output_lines.append(f"[{datetime.utcnow().isoformat()}] No changes detected for '{src_branch}' → '{dst_branch}'.")
+        return True
+
+    subprocess.run(["git", "config", "user.email", "gitsyncd@localhost"], cwd=dest_dir, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "GitSyncd Bot"], cwd=dest_dir, capture_output=True)
+    subprocess.run(["git", "add", "-A"], capture_output=True, text=True, cwd=dest_dir)
+
+    commit_result = subprocess.run(
+        ["git", "commit", "-m", f"sync({trigger}): {src_branch}→{dst_branch} from {config['source_url']} at {started_at}"],
+        capture_output=True, text=True, cwd=dest_dir,
+    )
+    output_lines.append((commit_result.stdout + commit_result.stderr).strip())
+    if commit_result.returncode != 0:
+        output_lines.append(f"ERROR: Commit failed for '{src_branch}' → '{dst_branch}'.")
+        return False
+
+    push_result = subprocess.run(
+        ["git", "push", "origin", f"HEAD:{dst_branch}"],
+        capture_output=True, text=True, cwd=dest_dir, timeout=120, env=git_env,
+    )
+    output_lines.append((push_result.stdout + push_result.stderr).strip())
+    if push_result.returncode != 0:
+        output_lines.append(f"ERROR: Push failed for '{src_branch}' → '{dst_branch}'.")
+        return False
+
+    output_lines.append(f"[{datetime.utcnow().isoformat()}] ✓ Push complete for '{src_branch}' → '{dst_branch}'.")
+    return True
+
+
 def run_sync(config_id: int, trigger: str = "manual"):
     conn = get_db()
     row = conn.execute("SELECT * FROM configs WHERE id = ?", (config_id,)).fetchone()
@@ -155,6 +250,7 @@ def run_sync(config_id: int, trigger: str = "manual"):
         conn.close()
         return
     config = dict(row)
+    branches = _get_branches(row)
     started_at = datetime.utcnow().isoformat()
     log_id = conn.execute(
         "INSERT INTO logs (config_id, started_at, status, trigger) VALUES (?, ?, 'running', ?)",
@@ -164,101 +260,43 @@ def run_sync(config_id: int, trigger: str = "manual"):
     conn.close()
 
     output_lines = []
-    status = "success"
+    any_error = False
     work_dir = tempfile.mkdtemp(prefix="gitsyncd_")
     tmp_key_file = None
 
     try:
         git_env, tmp_key_file = build_git_env(config.get("ssh_key"))
-
         src_url = embed_credentials(config["source_url"], config.get("git_username"), config.get("git_password"))
         dst_url = embed_credentials(config["dest_url"], config.get("git_username"), config.get("git_password"))
 
-        source_dir = os.path.join(work_dir, "source")
-        dest_dir = os.path.join(work_dir, "dest")
+        output_lines.append(f"[{started_at}] Trigger: {trigger}")
+        output_lines.append(f"[{started_at}] Source:  {config['source_url']}")
+        output_lines.append(f"[{started_at}] Dest:    {config['dest_url']}")
+        output_lines.append(f"[{started_at}] Branches to sync: {len(branches)}")
 
-        output_lines.append(f"[{datetime.utcnow().isoformat()}] Trigger: {trigger}")
-        output_lines.append(f"[{datetime.utcnow().isoformat()}] Cloning source: {config['source_url']} (branch: {config['source_branch']})")
-        result = subprocess.run(
-            ["git", "clone", "--branch", config["source_branch"], "--depth", "1", src_url, source_dir],
-            capture_output=True, text=True, timeout=120, env=git_env,
-        )
-        output_lines.append(result.stdout + result.stderr)
-        if result.returncode != 0:
-            raise RuntimeError(f"Clone source failed:\n{result.stderr}")
-
-        output_lines.append(f"[{datetime.utcnow().isoformat()}] Cloning destination: {config['dest_url']} (branch: {config['dest_branch']})")
-        dest_result = subprocess.run(
-            ["git", "clone", "--branch", config["dest_branch"], dst_url, dest_dir],
-            capture_output=True, text=True, timeout=120, env=git_env,
-        )
-        if dest_result.returncode != 0:
-            output_lines.append("Dest branch not found, cloning default...")
-            dest_result2 = subprocess.run(
-                ["git", "clone", dst_url, dest_dir],
-                capture_output=True, text=True, timeout=120, env=git_env,
+        for pair in branches:
+            src_branch = pair.get("from", "main")
+            dst_branch = pair.get("to", src_branch)
+            ok = _sync_branch_pair(
+                src_branch, dst_branch,
+                src_url, dst_url,
+                git_env, work_dir, config,
+                trigger, started_at, output_lines,
             )
-            output_lines.append(dest_result2.stdout + dest_result2.stderr)
-            if dest_result2.returncode != 0:
-                raise RuntimeError(f"Clone dest failed:\n{dest_result2.stderr}")
-        else:
-            output_lines.append(dest_result.stdout + dest_result.stderr)
+            if not ok:
+                any_error = True
 
-        output_lines.append(f"[{datetime.utcnow().isoformat()}] Syncing files...")
-        for item in os.listdir(dest_dir):
-            if item == ".git":
-                continue
-            full_path = os.path.join(dest_dir, item)
-            if os.path.isdir(full_path):
-                shutil.rmtree(full_path)
-            else:
-                os.remove(full_path)
-
-        for item in os.listdir(source_dir):
-            if item == ".git":
-                continue
-            src_path = os.path.join(source_dir, item)
-            dst_path = os.path.join(dest_dir, item)
-            if os.path.isdir(src_path):
-                shutil.copytree(src_path, dst_path)
-            else:
-                shutil.copy2(src_path, dst_path)
-
-        git_status = subprocess.run(
-            ["git", "status", "--porcelain"], capture_output=True, text=True, cwd=dest_dir,
-        )
-        if not git_status.stdout.strip():
-            output_lines.append(f"[{datetime.utcnow().isoformat()}] No changes detected. Nothing to push.")
-        else:
-            subprocess.run(["git", "config", "user.email", "gitsyncd@localhost"], cwd=dest_dir, capture_output=True)
-            subprocess.run(["git", "config", "user.name", "GitSyncd Bot"], cwd=dest_dir, capture_output=True)
-            subprocess.run(["git", "add", "-A"], capture_output=True, text=True, cwd=dest_dir)
-
-            commit_result = subprocess.run(
-                ["git", "commit", "-m", f"sync({trigger}): from {config['source_url']} at {started_at}"],
-                capture_output=True, text=True, cwd=dest_dir,
-            )
-            output_lines.append(commit_result.stdout + commit_result.stderr)
-            if commit_result.returncode != 0:
-                raise RuntimeError(f"Commit failed:\n{commit_result.stderr}")
-
-            push_result = subprocess.run(
-                ["git", "push", "origin", f"HEAD:{config['dest_branch']}"],
-                capture_output=True, text=True, cwd=dest_dir, timeout=120, env=git_env,
-            )
-            output_lines.append(push_result.stdout + push_result.stderr)
-            if push_result.returncode != 0:
-                raise RuntimeError(f"Push failed:\n{push_result.stderr}")
-
-            output_lines.append(f"[{datetime.utcnow().isoformat()}] Push complete.")
+        output_lines.append(f"\n[{datetime.utcnow().isoformat()}] All branches processed.")
 
     except Exception as e:
-        status = "error"
-        output_lines.append(f"ERROR: {str(e)}")
+        any_error = True
+        output_lines.append(f"\nFATAL ERROR: {str(e)}")
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
         if tmp_key_file and os.path.exists(tmp_key_file):
             os.unlink(tmp_key_file)
+
+    status = "error" if any_error else "success"
 
     finished_at = datetime.utcnow().isoformat()
     full_output = "\n".join(output_lines).strip()
@@ -398,17 +436,35 @@ def change_password():
 
 # ── Configs ───────────────────────────────────────────────────────────────────
 
+def _get_branches(row):
+    """Return parsed branch list from a config row."""
+    raw = row["branches"] if "branches" in row.keys() else None
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if parsed and isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
+    # Fall back to single-pair from legacy columns
+    src = row["source_branch"] if "source_branch" in row.keys() else "main"
+    dst = row["dest_branch"] if "dest_branch" in row.keys() else "main"
+    return [{"from": src or "main", "to": dst or "main"}]
+
+
 def _safe_config(row):
     d = dict(row)
     d.pop("git_password", None)
     d.pop("ssh_key", None)
     d.pop("webhook_secret", None)
+    d.pop("branches", None)
     has_ssh = bool(row["ssh_key"]) if "ssh_key" in row.keys() else False
     has_pass = bool(row["git_password"]) if "git_password" in row.keys() else False
     has_webhook = bool(row["webhook_secret"]) if "webhook_secret" in row.keys() else False
     d["has_ssh_key"] = has_ssh
     d["has_git_password"] = has_pass
     d["has_webhook_secret"] = has_webhook
+    d["branches"] = _get_branches(row)
     return d
 
 
@@ -429,17 +485,29 @@ def create_config():
         if not data.get(field, "").strip():
             return jsonify({"error": f"'{field}' is required"}), 400
     conn = get_db()
+    # Parse branch mappings
+    raw_branches = data.get("branches")
+    if raw_branches and isinstance(raw_branches, list) and len(raw_branches) > 0:
+        branches = [{"from": b.get("from", "main").strip() or "main", "to": b.get("to", "main").strip() or "main"} for b in raw_branches]
+    else:
+        src_b = data.get("source_branch", "main").strip() or "main"
+        dst_b = data.get("dest_branch", "main").strip() or "main"
+        branches = [{"from": src_b, "to": dst_b}]
+    first_src = branches[0]["from"]
+    first_dst = branches[0]["to"]
+
     cur = conn.execute(
         """INSERT INTO configs
-           (name, source_url, source_branch, dest_url, dest_branch, schedule,
+           (name, source_url, source_branch, dest_url, dest_branch, branches, schedule,
             ssh_key, git_username, git_password, webhook_secret, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             data["name"].strip(),
             data["source_url"].strip(),
-            data.get("source_branch", "main").strip() or "main",
+            first_src,
             data["dest_url"].strip(),
-            data.get("dest_branch", "main").strip() or "main",
+            first_dst,
+            json.dumps(branches),
             data.get("schedule", "").strip() or None,
             data.get("ssh_key", "").strip() or None,
             data.get("git_username", "").strip() or None,
@@ -487,19 +555,26 @@ def update_config(config_id):
 
     name = (data.get("name") or row["name"]).strip()
     source_url = (data.get("source_url") or row["source_url"]).strip()
-    source_branch = (data.get("source_branch") or row["source_branch"] or "main").strip()
     dest_url = (data.get("dest_url") or row["dest_url"]).strip()
-    dest_branch = (data.get("dest_branch") or row["dest_branch"] or "main").strip()
     schedule = _pick("schedule", row["schedule"])
     ssh_key = _pick("ssh_key", row["ssh_key"])
     git_username = _pick("git_username", row["git_username"])
     git_password = _pick("git_password", row["git_password"])
 
+    # Branch mappings
+    raw_branches = data.get("branches")
+    if raw_branches and isinstance(raw_branches, list) and len(raw_branches) > 0:
+        branches = [{"from": b.get("from", "main").strip() or "main", "to": b.get("to", "main").strip() or "main"} for b in raw_branches]
+    else:
+        branches = _get_branches(row)
+    first_src = branches[0]["from"]
+    first_dst = branches[0]["to"]
+
     conn.execute(
         """UPDATE configs SET name=?, source_url=?, source_branch=?, dest_url=?, dest_branch=?,
-           schedule=?, ssh_key=?, git_username=?, git_password=? WHERE id=?""",
-        (name, source_url, source_branch, dest_url, dest_branch,
-         schedule, ssh_key, git_username, git_password, config_id),
+           branches=?, schedule=?, ssh_key=?, git_username=?, git_password=? WHERE id=?""",
+        (name, source_url, first_src, dest_url, first_dst,
+         json.dumps(branches), schedule, ssh_key, git_username, git_password, config_id),
     )
     conn.commit()
     updated = conn.execute("SELECT * FROM configs WHERE id = ?", (config_id,)).fetchone()

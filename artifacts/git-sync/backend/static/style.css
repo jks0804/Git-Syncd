@@ -910,6 +910,76 @@ textarea::placeholder { color: var(--text-subtle); }
 
 .code-comment { color: var(--text-subtle); }
 
+/* ── Branch mapping form rows ────────────────────────────────────────────── */
+.branch-map-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.branch-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.branch-arrow {
+  color: var(--text-subtle);
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.branch-remove-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-subtle);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.branch-remove-btn:hover:not(:disabled) {
+  color: var(--red);
+  border-color: var(--red);
+  background: rgba(248, 81, 73, 0.08);
+}
+.branch-remove-btn:disabled { opacity: 0.25; cursor: default; }
+
+.branch-add-btn {
+  margin-top: 4px;
+  margin-bottom: 2px;
+}
+
+/* ── Branch display on cards ─────────────────────────────────────────────── */
+.card-branches {
+  margin: 8px 0 2px;
+}
+
+.branch-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.branch-pill {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 2px 9px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 /* ── Settings modal ──────────────────────────────────────────────────────── */
 .icon-btn {
   padding: 6px 10px;

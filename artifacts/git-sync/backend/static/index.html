@@ -76,15 +76,9 @@
         </div>
 
         <div class="form-section-title">Source Repository</div>
-        <div class="form-row">
-          <div class="form-group">
-            <label for="f-source-url">Source Repo URL</label>
-            <input type="text" id="f-source-url" placeholder="https://github.com/org/repo.git or git@github.com:org/repo.git" required />
-          </div>
-          <div class="form-group form-group-sm">
-            <label for="f-source-branch">Branch</label>
-            <input type="text" id="f-source-branch" placeholder="main" value="main" />
-          </div>
+        <div class="form-group">
+          <label for="f-source-url">Source Repo URL</label>
+          <input type="text" id="f-source-url" placeholder="https://github.com/org/repo.git or git@github.com:org/repo.git" required />
         </div>
 
         <div class="arrow-divider">
@@ -92,16 +86,20 @@
         </div>
 
         <div class="form-section-title">Destination Repository</div>
-        <div class="form-row">
-          <div class="form-group">
-            <label for="f-dest-url">Destination Repo URL</label>
-            <input type="text" id="f-dest-url" placeholder="https://github.com/org/backup.git or git@github.com:org/backup.git" required />
-          </div>
-          <div class="form-group form-group-sm">
-            <label for="f-dest-branch">Branch</label>
-            <input type="text" id="f-dest-branch" placeholder="main" value="main" />
-          </div>
+        <div class="form-group">
+          <label for="f-dest-url">Destination Repo URL</label>
+          <input type="text" id="f-dest-url" placeholder="https://github.com/org/backup.git or git@github.com:org/backup.git" required />
         </div>
+
+        <div class="form-section-title">
+          Branch Mappings
+          <span class="label-hint">(source branch → destination branch)</span>
+        </div>
+        <div id="branch-mappings-list"></div>
+        <button type="button" class="btn btn-ghost btn-sm branch-add-btn" onclick="addBranchRow()">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add Branch Mapping
+        </button>
 
         <div class="form-section-title">Authentication <span class="label-hint">(optional — for private repos)</span></div>
         <div class="auth-tabs">

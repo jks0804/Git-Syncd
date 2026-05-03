@@ -55,7 +55,20 @@ function authBadges(c) {
   return badges.join("");
 }
 
+function branchPairsHtml(branches) {
+  if (!branches || branches.length === 0) return "";
+  if (branches.length === 1) {
+    const b = branches[0];
+    return `<span class="repo-branch">${escHtml(b.from)}${b.from !== b.to ? " → " + escHtml(b.to) : ""}</span>`;
+  }
+  const pills = branches.map(b =>
+    `<span class="branch-pill">${escHtml(b.from)}${b.from !== b.to ? " → " + escHtml(b.to) : ""}</span>`
+  ).join("");
+  return `<div class="branch-pills">${pills}</div>`;
+}
+
 function renderCard(c) {
+  const branches = c.branches || [{ from: c.source_branch || "main", to: c.dest_branch || "main" }];
   const scheduleHtml = c.schedule
     ? `<span class="meta-item"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>${c.schedule}</span>`
     : `<span class="meta-item" style="color:var(--text-subtle)">Manual only</span>`;
@@ -76,7 +89,6 @@ function renderCard(c) {
         <div class="repo-row">
           <span class="repo-label">SRC</span>
           <span class="repo-url" title="${escHtml(c.source_url)}">${escHtml(shortUrl(c.source_url))}</span>
-          <span class="repo-branch">${escHtml(c.source_branch)}</span>
         </div>
         <div class="repo-row flow-arrow">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
@@ -84,9 +96,9 @@ function renderCard(c) {
         <div class="repo-row">
           <span class="repo-label">DST</span>
           <span class="repo-url" title="${escHtml(c.dest_url)}">${escHtml(shortUrl(c.dest_url))}</span>
-          <span class="repo-branch">${escHtml(c.dest_branch)}</span>
         </div>
       </div>
+      <div class="card-branches">${branchPairsHtml(branches)}</div>
       <div class="card-meta">
         ${scheduleHtml}
         ${lastSyncHtml}
@@ -269,17 +281,62 @@ async function saveSettings() {
   }
 }
 
+// ── Branch mapping rows ───────────────────────────────────────────────────────
+function setBranchMappings(branches) {
+  const list = document.getElementById("branch-mappings-list");
+  list.innerHTML = "";
+  const pairs = (branches && branches.length > 0) ? branches : [{ from: "main", to: "main" }];
+  pairs.forEach(b => addBranchRow(b.from, b.to));
+}
+
+function addBranchRow(from = "", to = "") {
+  const list = document.getElementById("branch-mappings-list");
+  const idx = list.children.length;
+  const row = document.createElement("div");
+  row.className = "branch-map-row";
+  row.innerHTML = `
+    <input type="text" class="branch-input" placeholder="main" value="${escHtml(from)}" required />
+    <span class="branch-arrow">→</span>
+    <input type="text" class="branch-input" placeholder="main" value="${escHtml(to)}" required />
+    <button type="button" class="branch-remove-btn" onclick="removeBranchRow(this)" title="Remove">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>`;
+  list.appendChild(row);
+  updateRemoveButtons();
+}
+
+function removeBranchRow(btn) {
+  const list = document.getElementById("branch-mappings-list");
+  if (list.children.length <= 1) return;
+  btn.closest(".branch-map-row").remove();
+  updateRemoveButtons();
+}
+
+function updateRemoveButtons() {
+  const rows = document.querySelectorAll("#branch-mappings-list .branch-map-row");
+  rows.forEach(r => {
+    r.querySelector(".branch-remove-btn").disabled = rows.length <= 1;
+  });
+}
+
+function getBranchMappings() {
+  const rows = document.querySelectorAll("#branch-mappings-list .branch-map-row");
+  return Array.from(rows).map(row => {
+    const inputs = row.querySelectorAll("input");
+    return { from: inputs[0].value.trim() || "main", to: inputs[1].value.trim() || "main" };
+  }).filter(b => b.from);
+}
+
 // Modal - Add/Edit
 function openAddModal() {
   document.getElementById("modal-title").textContent = "Add Sync Configuration";
   document.getElementById("form-submit-btn").textContent = "Create";
   document.getElementById("edit-id").value = "";
   document.getElementById("config-form").reset();
-  document.getElementById("f-source-branch").value = "main";
-  document.getElementById("f-dest-branch").value = "main";
   document.getElementById("pw-saved-badge").classList.add("hidden");
   document.getElementById("ssh-key-status").classList.add("hidden");
   switchAuthTab("ssh");
+  setBranchMappings([{ from: "main", to: "main" }]);
 
   // Pre-fill URL fields from default settings
   const srcDefault = _appSettings.default_source_url || "";
@@ -296,7 +353,6 @@ function openAddModal() {
   }
 
   document.getElementById("modal-overlay").classList.remove("hidden");
-  // Focus at end of pre-filled value
   if (srcDefault) { srcEl.focus(); srcEl.setSelectionRange(srcEl.value.length, srcEl.value.length); }
 }
 
@@ -308,10 +364,9 @@ async function openEditModal(id) {
     document.getElementById("edit-id").value = id;
     document.getElementById("f-name").value = c.name;
     document.getElementById("f-source-url").value = c.source_url;
-    document.getElementById("f-source-branch").value = c.source_branch;
     document.getElementById("f-dest-url").value = c.dest_url;
-    document.getElementById("f-dest-branch").value = c.dest_branch;
     document.getElementById("f-schedule").value = c.schedule || "";
+    setBranchMappings(c.branches || [{ from: c.source_branch || "main", to: c.dest_branch || "main" }]);
     document.getElementById("f-ssh-key").value = "";
     document.getElementById("f-git-username").value = c.git_username || "";
     document.getElementById("f-git-password").value = "";
@@ -366,9 +421,8 @@ async function submitConfigForm(e) {
   const body = {
     name: document.getElementById("f-name").value.trim(),
     source_url: document.getElementById("f-source-url").value.trim(),
-    source_branch: document.getElementById("f-source-branch").value.trim() || "main",
     dest_url: document.getElementById("f-dest-url").value.trim(),
-    dest_branch: document.getElementById("f-dest-branch").value.trim() || "main",
+    branches: getBranchMappings(),
     schedule: document.getElementById("f-schedule").value.trim() || null,
   };
 
