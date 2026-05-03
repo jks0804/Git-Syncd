@@ -80,7 +80,7 @@ def init_db():
             FOREIGN KEY (config_id) REFERENCES configs(id) ON DELETE CASCADE
         );
     """)
-    # Migrate old schema
+    # Migrate old schema — configs
     for col, defn in [
         ("ssh_key", "TEXT"),
         ("git_username", "TEXT"),
@@ -97,6 +97,11 @@ def init_db():
         conn.execute("ALTER TABLE logs ADD COLUMN trigger TEXT NOT NULL DEFAULT 'manual'")
     except Exception:
         pass
+    # Migrate users table
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass
     conn.commit()
 
     existing = conn.execute("SELECT id FROM users LIMIT 1").fetchone()
@@ -104,11 +109,15 @@ def init_db():
         default_pass = os.environ.get("ADMIN_PASSWORD", "admin123")
         default_user = os.environ.get("ADMIN_USERNAME", "admin")
         conn.execute(
-            "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
+            "INSERT INTO users (username, password_hash, created_at, is_admin) VALUES (?, ?, ?, 1)",
             (default_user, generate_password_hash(default_pass), datetime.utcnow().isoformat()),
         )
         conn.commit()
-        print(f"[init] Created default user: {default_user} / {default_pass}")
+        print(f"[init] Created default admin: {default_user} / {default_pass}")
+    else:
+        # Ensure the first-ever user is always admin (migration for existing DBs)
+        conn.execute("UPDATE users SET is_admin = 1 WHERE id = (SELECT MIN(id) FROM users)")
+        conn.commit()
 
     conn.close()
 
@@ -118,6 +127,17 @@ def login_required(f):
     def decorated(*args, **kwargs):
         if not session.get("user_id"):
             return jsonify({"error": "Unauthorized"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+
+def admin_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get("user_id"):
+            return jsonify({"error": "Unauthorized"}), 401
+        if not session.get("is_admin"):
+            return jsonify({"error": "Forbidden"}), 403
         return f(*args, **kwargs)
     return decorated
 
@@ -380,6 +400,19 @@ def index():
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
+def _get_allow_registration():
+    conn = get_db()
+    row = conn.execute("SELECT value FROM settings WHERE key = 'allow_registration'").fetchone()
+    conn.close()
+    return row and row["value"] == "1"
+
+
+@app.route("/v1/auth/status", methods=["GET"])
+def auth_status():
+    """Public endpoint: returns registration on/off state."""
+    return jsonify({"allow_registration": _get_allow_registration()})
+
+
 @app.route("/v1/auth/login", methods=["POST"])
 def auth_login():
     data = request.get_json(force=True)
@@ -394,7 +427,39 @@ def auth_login():
         return jsonify({"error": "Invalid username or password"}), 401
     session["user_id"] = row["id"]
     session["username"] = row["username"]
-    return jsonify({"ok": True, "username": row["username"]})
+    session["is_admin"] = bool(row["is_admin"])
+    return jsonify({"ok": True, "username": row["username"], "is_admin": bool(row["is_admin"])})
+
+
+@app.route("/v1/auth/register", methods=["POST"])
+def auth_register():
+    if not _get_allow_registration():
+        return jsonify({"error": "Registration is currently disabled"}), 403
+    data = request.get_json(force=True)
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    if not username or not password:
+        return jsonify({"error": "Username and password required"}), 400
+    if len(username) < 3:
+        return jsonify({"error": "Username must be at least 3 characters"}), 400
+    if len(password) < 6:
+        return jsonify({"error": "Password must be at least 6 characters"}), 400
+    conn = get_db()
+    existing = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+    if existing:
+        conn.close()
+        return jsonify({"error": "Username already taken"}), 409
+    conn.execute(
+        "INSERT INTO users (username, password_hash, created_at, is_admin) VALUES (?, ?, ?, 0)",
+        (username, generate_password_hash(password), datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    conn.close()
+    session["user_id"] = row["id"]
+    session["username"] = row["username"]
+    session["is_admin"] = False
+    return jsonify({"ok": True, "username": row["username"], "is_admin": False}), 201
 
 
 @app.route("/v1/auth/logout", methods=["POST"])
@@ -407,7 +472,11 @@ def auth_logout():
 def auth_me():
     if not session.get("user_id"):
         return jsonify({"error": "Unauthorized"}), 401
-    return jsonify({"username": session.get("username"), "user_id": session.get("user_id")})
+    return jsonify({
+        "username": session.get("username"),
+        "user_id": session.get("user_id"),
+        "is_admin": session.get("is_admin", False),
+    })
 
 
 @app.route("/v1/auth/password", methods=["PUT"])
@@ -618,22 +687,91 @@ def get_settings():
 def update_settings():
     data = request.get_json(force=True)
     allowed_keys = {"default_source_url", "default_dest_url"}
+    # allow_registration is admin-only
+    if session.get("is_admin"):
+        allowed_keys.add("allow_registration")
     conn = get_db()
     for key, value in data.items():
         if key not in allowed_keys:
             continue
-        value = (value or "").strip().rstrip("/")
-        if value:
+        if key == "allow_registration":
+            # Boolean stored as "1"/"0"
+            bool_val = "1" if (value and str(value) not in ("0", "false", "False", "")) else "0"
             conn.execute(
                 "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (key, value),
+                (key, bool_val),
             )
         else:
-            conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+            value = (value or "").strip().rstrip("/")
+            if value:
+                conn.execute(
+                    "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, value),
+                )
+            else:
+                conn.execute("DELETE FROM settings WHERE key = ?", (key,))
     conn.commit()
     rows = conn.execute("SELECT key, value FROM settings").fetchall()
     conn.close()
     return jsonify({r["key"]: r["value"] for r in rows})
+
+
+# ── User management (admin only) ─────────────────────────────────────────────
+
+@app.route("/v1/users", methods=["GET"])
+@admin_required
+def list_users():
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT id, username, is_admin, created_at FROM users ORDER BY id ASC"
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/v1/users/<int:uid>", methods=["DELETE"])
+@admin_required
+def delete_user(uid):
+    if uid == session.get("user_id"):
+        return jsonify({"error": "You cannot delete your own account"}), 400
+    conn = get_db()
+    row = conn.execute("SELECT id, is_admin FROM users WHERE id = ?", (uid,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "User not found"}), 404
+    # Don't allow deleting the last admin
+    if row["is_admin"]:
+        count = conn.execute("SELECT COUNT(*) as c FROM users WHERE is_admin = 1").fetchone()["c"]
+        if count <= 1:
+            conn.close()
+            return jsonify({"error": "Cannot delete the only admin account"}), 400
+    conn.execute("DELETE FROM users WHERE id = ?", (uid,))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/v1/users/<int:uid>/role", methods=["PUT"])
+@admin_required
+def set_user_role(uid):
+    data = request.get_json(force=True)
+    is_admin = 1 if data.get("is_admin") else 0
+    if uid == session.get("user_id") and not is_admin:
+        return jsonify({"error": "You cannot remove your own admin role"}), 400
+    conn = get_db()
+    row = conn.execute("SELECT id FROM users WHERE id = ?", (uid,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "User not found"}), 404
+    if not is_admin:
+        count = conn.execute("SELECT COUNT(*) as c FROM users WHERE is_admin = 1").fetchone()["c"]
+        if count <= 1:
+            conn.close()
+            return jsonify({"error": "Cannot remove the only admin account"}), 400
+    conn.execute("UPDATE users SET is_admin = ? WHERE id = ?", (is_admin, uid))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
 
 
 # ── Webhook management (authenticated) ───────────────────────────────────────

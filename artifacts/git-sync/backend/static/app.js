@@ -207,6 +207,16 @@ function openSettings() {
   syncSameCheckbox();
   updateSourcePreview();
   updateDestPreview();
+  // Admin-only section
+  const adminSection = document.getElementById("settings-users-section");
+  if (adminSection && _currentUser?.is_admin) {
+    adminSection.classList.remove("hidden");
+    const regToggle = document.getElementById("s-allow-registration");
+    if (regToggle) regToggle.checked = _appSettings.allow_registration === "1";
+    loadUsers();
+  } else if (adminSection) {
+    adminSection.classList.add("hidden");
+  }
   document.getElementById("settings-overlay").classList.remove("hidden");
   document.getElementById("s-default-source").focus();
 }
@@ -266,10 +276,15 @@ async function saveSettings() {
   const src = document.getElementById("s-default-source").value.trim().replace(/\/$/, "");
   let dst = document.getElementById("s-default-dest").value.trim().replace(/\/$/, "");
   if (document.getElementById("s-same-instance").checked) dst = src;
+  const payload = { default_source_url: src, default_dest_url: dst };
+  if (_currentUser?.is_admin) {
+    const regToggle = document.getElementById("s-allow-registration");
+    if (regToggle) payload.allow_registration = regToggle.checked;
+  }
   try {
     _appSettings = await apiFetch("/settings", {
       method: "PUT",
-      body: JSON.stringify({ default_source_url: src, default_dest_url: dst }),
+      body: JSON.stringify(payload),
     });
     toast("Settings saved", "success");
     closeSettings();
@@ -684,13 +699,87 @@ document.addEventListener("keydown", (e) => {
 document.getElementById("s-default-source").addEventListener("input", updateSourcePreview);
 document.getElementById("s-default-dest").addEventListener("input", updateDestPreview);
 
-// Load user info
+// ── Current user ──────────────────────────────────────────────────────────────
+let _currentUser = null;
+
 async function initUser() {
   try {
-    const me = await apiFetch("/auth/me");
+    _currentUser = await apiFetch("/auth/me");
     const el = document.getElementById("user-label");
-    if (el) el.textContent = me.username;
+    if (el) el.textContent = _currentUser.username;
+    // Show admin badge in dropdown
+    const info = document.getElementById("dropdown-info");
+    if (info) {
+      info.innerHTML = `
+        <div class="dropdown-user-info">
+          <span class="dropdown-username">${escHtml(_currentUser.username)}</span>
+          ${_currentUser.is_admin ? '<span class="admin-badge">Admin</span>' : ''}
+        </div>`;
+    }
   } catch (_) {}
+}
+
+// ── User management ────────────────────────────────────────────────────────────
+async function loadUsers() {
+  const list = document.getElementById("users-list");
+  if (!list) return;
+  list.innerHTML = '<div class="users-loading">Loading…</div>';
+  try {
+    const users = await apiFetch("/users");
+    if (users.length === 0) {
+      list.innerHTML = '<div class="users-empty">No users found.</div>';
+      return;
+    }
+    list.innerHTML = users.map(u => `
+      <div class="user-row" id="urow-${u.id}">
+        <div class="user-row-info">
+          <span class="user-row-name">${escHtml(u.username)}</span>
+          ${u.is_admin ? '<span class="admin-badge">Admin</span>' : ''}
+          ${u.id === _currentUser?.user_id ? '<span class="you-badge">you</span>' : ''}
+        </div>
+        <div class="user-row-actions">
+          <button class="btn btn-ghost btn-xs user-role-btn"
+            onclick="toggleUserRole(${u.id}, ${u.is_admin ? 0 : 1})"
+            ${u.id === _currentUser?.user_id ? 'disabled title="Cannot change your own role"' : ''}
+            title="${u.is_admin ? 'Demote to regular user' : 'Promote to admin'}">
+            ${u.is_admin ? 'Demote' : 'Make admin'}
+          </button>
+          <button class="btn btn-ghost btn-xs user-delete-btn"
+            onclick="deleteUser(${u.id})"
+            ${u.id === _currentUser?.user_id ? 'disabled title="Cannot delete your own account"' : ''}
+            title="Delete user">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+          </button>
+        </div>
+      </div>
+    `).join("");
+  } catch (e) {
+    list.innerHTML = `<div class="users-empty">Failed to load users: ${escHtml(e.message)}</div>`;
+  }
+}
+
+async function deleteUser(uid) {
+  if (!confirm("Delete this user? This cannot be undone.")) return;
+  try {
+    await apiFetch(`/users/${uid}`, { method: "DELETE" });
+    toast("User deleted", "success");
+    loadUsers();
+  } catch (e) {
+    toast("Failed to delete: " + e.message, "error");
+  }
+}
+
+async function toggleUserRole(uid, makeAdmin) {
+  try {
+    await apiFetch(`/users/${uid}/role`, {
+      method: "PUT",
+      body: JSON.stringify({ is_admin: makeAdmin }),
+    });
+    toast(makeAdmin ? "User promoted to admin" : "User demoted", "success");
+    loadUsers();
+  } catch (e) {
+    toast("Failed: " + e.message, "error");
+  }
 }
 
 setInterval(loadConfigs, 10000);
