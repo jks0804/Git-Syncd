@@ -5,6 +5,9 @@ import shutil
 import tempfile
 import threading
 import stat
+import hmac
+import hashlib
+import secrets
 from datetime import datetime
 from functools import wraps
 from flask import Flask, request, jsonify, send_from_directory, session, redirect
@@ -27,7 +30,6 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 
 scheduler = BackgroundScheduler(daemon=True)
-sync_lock = threading.Lock()
 
 
 def get_db():
@@ -56,6 +58,7 @@ def init_db():
             ssh_key TEXT,
             git_username TEXT,
             git_password TEXT,
+            webhook_secret TEXT,
             created_at TEXT NOT NULL,
             last_sync TEXT,
             last_status TEXT
@@ -67,22 +70,28 @@ def init_db():
             finished_at TEXT,
             status TEXT NOT NULL DEFAULT 'running',
             output TEXT,
+            trigger TEXT NOT NULL DEFAULT 'manual',
             FOREIGN KEY (config_id) REFERENCES configs(id) ON DELETE CASCADE
         );
     """)
-    # Add new columns if upgrading from old schema
+    # Migrate old schema
     for col, defn in [
         ("ssh_key", "TEXT"),
         ("git_username", "TEXT"),
         ("git_password", "TEXT"),
+        ("webhook_secret", "TEXT"),
+        ("trigger", "TEXT NOT NULL DEFAULT 'manual'"),
     ]:
         try:
             conn.execute(f"ALTER TABLE configs ADD COLUMN {col} {defn}")
         except Exception:
             pass
+    try:
+        conn.execute("ALTER TABLE logs ADD COLUMN trigger TEXT NOT NULL DEFAULT 'manual'")
+    except Exception:
+        pass
     conn.commit()
 
-    # Seed default admin user if none exist
     existing = conn.execute("SELECT id FROM users LIMIT 1").fetchone()
     if not existing:
         default_pass = os.environ.get("ADMIN_PASSWORD", "admin123")
@@ -135,7 +144,7 @@ def embed_credentials(url, username, password):
     return url
 
 
-def run_sync(config_id: int):
+def run_sync(config_id: int, trigger: str = "manual"):
     conn = get_db()
     row = conn.execute("SELECT * FROM configs WHERE id = ?", (config_id,)).fetchone()
     if not row:
@@ -144,8 +153,8 @@ def run_sync(config_id: int):
     config = dict(row)
     started_at = datetime.utcnow().isoformat()
     log_id = conn.execute(
-        "INSERT INTO logs (config_id, started_at, status) VALUES (?, ?, 'running')",
-        (config_id, started_at),
+        "INSERT INTO logs (config_id, started_at, status, trigger) VALUES (?, ?, 'running', ?)",
+        (config_id, started_at, trigger),
     ).lastrowid
     conn.commit()
     conn.close()
@@ -158,20 +167,13 @@ def run_sync(config_id: int):
     try:
         git_env, tmp_key_file = build_git_env(config.get("ssh_key"))
 
-        src_url = embed_credentials(
-            config["source_url"],
-            config.get("git_username"),
-            config.get("git_password"),
-        )
-        dst_url = embed_credentials(
-            config["dest_url"],
-            config.get("git_username"),
-            config.get("git_password"),
-        )
+        src_url = embed_credentials(config["source_url"], config.get("git_username"), config.get("git_password"))
+        dst_url = embed_credentials(config["dest_url"], config.get("git_username"), config.get("git_password"))
 
         source_dir = os.path.join(work_dir, "source")
         dest_dir = os.path.join(work_dir, "dest")
 
+        output_lines.append(f"[{datetime.utcnow().isoformat()}] Trigger: {trigger}")
         output_lines.append(f"[{datetime.utcnow().isoformat()}] Cloning source: {config['source_url']} (branch: {config['source_branch']})")
         result = subprocess.run(
             ["git", "clone", "--branch", config["source_branch"], "--depth", "1", src_url, source_dir],
@@ -187,7 +189,7 @@ def run_sync(config_id: int):
             capture_output=True, text=True, timeout=120, env=git_env,
         )
         if dest_result.returncode != 0:
-            output_lines.append("Dest branch not found, cloning default and creating branch...")
+            output_lines.append("Dest branch not found, cloning default...")
             dest_result2 = subprocess.run(
                 ["git", "clone", dst_url, dest_dir],
                 capture_output=True, text=True, timeout=120, env=git_env,
@@ -198,7 +200,7 @@ def run_sync(config_id: int):
         else:
             output_lines.append(dest_result.stdout + dest_result.stderr)
 
-        output_lines.append(f"[{datetime.utcnow().isoformat()}] Syncing files from source to destination...")
+        output_lines.append(f"[{datetime.utcnow().isoformat()}] Syncing files...")
         for item in os.listdir(dest_dir):
             if item == ".git":
                 continue
@@ -226,11 +228,10 @@ def run_sync(config_id: int):
         else:
             subprocess.run(["git", "config", "user.email", "gitsyncd@localhost"], cwd=dest_dir, capture_output=True)
             subprocess.run(["git", "config", "user.name", "GitSyncd Bot"], cwd=dest_dir, capture_output=True)
-
             subprocess.run(["git", "add", "-A"], capture_output=True, text=True, cwd=dest_dir)
 
             commit_result = subprocess.run(
-                ["git", "commit", "-m", f"sync: from {config['source_url']} at {started_at}"],
+                ["git", "commit", "-m", f"sync({trigger}): from {config['source_url']} at {started_at}"],
                 capture_output=True, text=True, cwd=dest_dir,
             )
             output_lines.append(commit_result.stdout + commit_result.stderr)
@@ -281,7 +282,10 @@ def schedule_config(config_id: int, cron_expr: str):
     trigger = CronTrigger(
         minute=parts[0], hour=parts[1], day=parts[2], month=parts[3], day_of_week=parts[4]
     )
-    scheduler.add_job(run_sync, trigger, args=[config_id], id=job_id, replace_existing=True)
+    scheduler.add_job(
+        lambda cid=config_id: run_sync(cid, "scheduled"),
+        trigger, id=job_id, replace_existing=True,
+    )
 
 
 def remove_schedule(config_id: int):
@@ -290,7 +294,33 @@ def remove_schedule(config_id: int):
         scheduler.remove_job(job_id)
 
 
-# ── Static pages ────────────────────────────────────────────────────────────
+def verify_webhook_signature(config, raw_body: bytes) -> bool:
+    secret = config.get("webhook_secret")
+    if not secret:
+        return True  # No secret set — allow all (open webhook)
+
+    # GitHub: X-Hub-Signature-256: sha256=<hex>
+    gh_sig = request.headers.get("X-Hub-Signature-256", "")
+    if gh_sig.startswith("sha256="):
+        expected = "sha256=" + hmac.new(
+            secret.encode(), raw_body, hashlib.sha256
+        ).hexdigest()
+        return hmac.compare_digest(expected, gh_sig)
+
+    # GitLab: X-Gitlab-Token: <secret>
+    gl_token = request.headers.get("X-Gitlab-Token", "")
+    if gl_token:
+        return hmac.compare_digest(gl_token, secret)
+
+    # Generic: X-Webhook-Secret: <secret>
+    generic = request.headers.get("X-Webhook-Secret", "")
+    if generic:
+        return hmac.compare_digest(generic, secret)
+
+    return False
+
+
+# ── Static pages ─────────────────────────────────────────────────────────────
 
 @app.route("/login")
 def login_page():
@@ -306,7 +336,7 @@ def index():
     return send_from_directory(STATIC_DIR, "index.html")
 
 
-# ── Auth endpoints ───────────────────────────────────────────────────────────
+# ── Auth ──────────────────────────────────────────────────────────────────────
 
 @app.route("/v1/auth/login", methods=["POST"])
 def auth_login():
@@ -362,16 +392,19 @@ def change_password():
     return jsonify({"ok": True})
 
 
-# ── Config endpoints ─────────────────────────────────────────────────────────
+# ── Configs ───────────────────────────────────────────────────────────────────
 
 def _safe_config(row):
     d = dict(row)
     d.pop("git_password", None)
-    has_ssh = bool(d.get("ssh_key", ""))
+    d.pop("ssh_key", None)
+    d.pop("webhook_secret", None)
+    has_ssh = bool(row["ssh_key"]) if "ssh_key" in row.keys() else False
     has_pass = bool(row["git_password"]) if "git_password" in row.keys() else False
+    has_webhook = bool(row["webhook_secret"]) if "webhook_secret" in row.keys() else False
     d["has_ssh_key"] = has_ssh
     d["has_git_password"] = has_pass
-    d.pop("ssh_key", None)
+    d["has_webhook_secret"] = has_webhook
     return d
 
 
@@ -388,15 +421,15 @@ def list_configs():
 @login_required
 def create_config():
     data = request.get_json(force=True)
-    required = ["name", "source_url", "dest_url"]
-    for field in required:
+    for field in ["name", "source_url", "dest_url"]:
         if not data.get(field, "").strip():
             return jsonify({"error": f"'{field}' is required"}), 400
     conn = get_db()
     cur = conn.execute(
         """INSERT INTO configs
-           (name, source_url, source_branch, dest_url, dest_branch, schedule, ssh_key, git_username, git_password, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           (name, source_url, source_branch, dest_url, dest_branch, schedule,
+            ssh_key, git_username, git_password, webhook_secret, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             data["name"].strip(),
             data["source_url"].strip(),
@@ -407,6 +440,7 @@ def create_config():
             data.get("ssh_key", "").strip() or None,
             data.get("git_username", "").strip() or None,
             data.get("git_password", "").strip() or None,
+            data.get("webhook_secret", "").strip() or None,
             datetime.utcnow().isoformat(),
         ),
     )
@@ -430,8 +464,7 @@ def get_config(config_id):
     conn.close()
     if not row:
         return jsonify({"error": "Not found"}), 404
-    d = _safe_config(row)
-    return jsonify(d)
+    return jsonify(_safe_config(row))
 
 
 @app.route("/v1/configs/<int:config_id>", methods=["PUT"])
@@ -444,34 +477,19 @@ def update_config(config_id):
         conn.close()
         return jsonify({"error": "Not found"}), 404
 
-    name = data.get("name", row["name"]).strip()
-    source_url = data.get("source_url", row["source_url"]).strip()
-    source_branch = data.get("source_branch", row["source_branch"]).strip() or "main"
-    dest_url = data.get("dest_url", row["dest_url"]).strip()
-    dest_branch = data.get("dest_branch", row["dest_branch"]).strip() or "main"
-    schedule = data.get("schedule", row["schedule"])
-    if isinstance(schedule, str):
-        schedule = schedule.strip() or None
+    def _pick(key, fallback):
+        val = data.get(key)
+        return fallback if val is None else (val.strip() or None)
 
-    ssh_key = data.get("ssh_key")
-    if ssh_key is None:
-        ssh_key = row["ssh_key"]
-    else:
-        ssh_key = ssh_key.strip() or None
-
-    git_username = data.get("git_username")
-    if git_username is None:
-        git_username = row["git_username"]
-    else:
-        git_username = git_username.strip() or None
-
-    git_password = data.get("git_password")
-    if git_password is None:
-        git_password = row["git_password"]
-    elif git_password == "":
-        git_password = None
-    else:
-        git_password = git_password.strip()
+    name = (data.get("name") or row["name"]).strip()
+    source_url = (data.get("source_url") or row["source_url"]).strip()
+    source_branch = (data.get("source_branch") or row["source_branch"] or "main").strip()
+    dest_url = (data.get("dest_url") or row["dest_url"]).strip()
+    dest_branch = (data.get("dest_branch") or row["dest_branch"] or "main").strip()
+    schedule = _pick("schedule", row["schedule"])
+    ssh_key = _pick("ssh_key", row["ssh_key"])
+    git_username = _pick("git_username", row["git_username"])
+    git_password = _pick("git_password", row["git_password"])
 
     conn.execute(
         """UPDATE configs SET name=?, source_url=?, source_branch=?, dest_url=?, dest_branch=?,
@@ -505,6 +523,76 @@ def delete_config(config_id):
     return jsonify({"ok": True})
 
 
+# ── Webhook management (authenticated) ───────────────────────────────────────
+
+@app.route("/v1/configs/<int:config_id>/webhook", methods=["GET"])
+@login_required
+def get_webhook_info(config_id):
+    conn = get_db()
+    row = conn.execute("SELECT id, webhook_secret FROM configs WHERE id = ?", (config_id,)).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify({
+        "webhook_url": f"/webhooks/{config_id}",
+        "has_secret": bool(row["webhook_secret"]),
+        "secret": row["webhook_secret"] or "",
+    })
+
+
+@app.route("/v1/configs/<int:config_id>/webhook", methods=["PUT"])
+@login_required
+def save_webhook_secret(config_id):
+    data = request.get_json(force=True)
+    action = data.get("action", "save")
+    conn = get_db()
+    row = conn.execute("SELECT id FROM configs WHERE id = ?", (config_id,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "Not found"}), 404
+
+    if action == "generate":
+        new_secret = secrets.token_hex(24)
+    elif action == "clear":
+        new_secret = None
+    else:
+        new_secret = (data.get("secret") or "").strip() or None
+
+    conn.execute("UPDATE configs SET webhook_secret = ? WHERE id = ?", (new_secret, config_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "secret": new_secret or "", "has_secret": bool(new_secret)})
+
+
+# ── Public webhook receiver ───────────────────────────────────────────────────
+
+@app.route("/webhooks/<int:config_id>", methods=["POST"])
+def receive_webhook(config_id):
+    raw_body = request.get_data()
+    conn = get_db()
+    row = conn.execute("SELECT * FROM configs WHERE id = ?", (config_id,)).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+
+    config = dict(row)
+    if not verify_webhook_signature(config, raw_body):
+        return jsonify({"error": "Invalid signature"}), 403
+
+    # Determine event source for the log label
+    trigger_label = "webhook"
+    if request.headers.get("X-GitHub-Event"):
+        trigger_label = f"github:{request.headers.get('X-GitHub-Event')}"
+    elif request.headers.get("X-Gitlab-Event"):
+        trigger_label = f"gitlab:{request.headers.get('X-Gitlab-Event')}"
+
+    thread = threading.Thread(target=run_sync, args=(config_id, trigger_label), daemon=True)
+    thread.start()
+    return jsonify({"ok": True, "message": "Sync triggered"})
+
+
+# ── Sync + logs ───────────────────────────────────────────────────────────────
+
 @app.route("/v1/sync/<int:config_id>", methods=["POST"])
 @login_required
 def trigger_sync(config_id):
@@ -513,7 +601,7 @@ def trigger_sync(config_id):
     conn.close()
     if not row:
         return jsonify({"error": "Not found"}), 404
-    thread = threading.Thread(target=run_sync, args=(config_id,), daemon=True)
+    thread = threading.Thread(target=run_sync, args=(config_id, "manual"), daemon=True)
     thread.start()
     return jsonify({"ok": True, "message": "Sync started"})
 

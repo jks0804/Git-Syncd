@@ -97,6 +97,10 @@ function renderCard(c) {
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.6"/></svg>
         Sync Now
       </button>
+      <button class="btn btn-ghost btn-sm" onclick="openWebhookModal(${c.id}, '${escHtml(c.name)}')" title="${c.has_webhook_secret ? 'Webhook active' : 'Set up webhook'}">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="${c.has_webhook_secret ? '#3fb950' : 'currentColor'}" stroke-width="2"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92-1.31-2.92-2.92-2.92z"/></svg>
+        Webhook
+      </button>
       <button class="btn btn-ghost btn-sm" onclick="openLogs(${c.id}, '${escHtml(c.name)}')">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
         Logs
@@ -401,8 +405,117 @@ async function submitPasswordChange(e) {
   }
 }
 
+// ── Webhook modal ────────────────────────────────────────────────────────────
+let _whConfigId = null;
+
+async function openWebhookModal(configId, name) {
+  _whConfigId = configId;
+  document.getElementById("wh-title").textContent = `Webhook — ${name}`;
+  document.getElementById("wh-overlay").classList.remove("hidden");
+  document.getElementById("wh-secret-input").value = "";
+  try {
+    const info = await apiFetch(`/configs/${configId}/webhook`);
+    const fullUrl = window.location.origin + info.webhook_url;
+    document.getElementById("wh-url").textContent = fullUrl;
+    document.getElementById("wh-secret-input").value = info.secret || "";
+    document.getElementById("wh-secret-input").type = "password";
+  } catch (e) {
+    toast("Failed to load webhook info: " + e.message, "error");
+  }
+}
+
+function closeWh() { document.getElementById("wh-overlay").classList.add("hidden"); }
+function closeWhIfOutside(e) { if (e.target === document.getElementById("wh-overlay")) closeWh(); }
+
+function switchPlatform(p) {
+  ["github", "gitlab", "generic"].forEach((id) => {
+    document.getElementById(`instr-${id}`).classList.toggle("hidden", id !== p);
+    document.getElementById(`ptab-${id}`).classList.toggle("active", id === p);
+  });
+}
+
+function toggleWhSecret() {
+  const el = document.getElementById("wh-secret-input");
+  el.type = el.type === "password" ? "text" : "password";
+}
+
+async function generateWhSecret() {
+  if (!_whConfigId) return;
+  const btn = document.querySelector("#wh-overlay .btn[onclick='generateWhSecret()']");
+  if (btn) btn.disabled = true;
+  try {
+    const res = await apiFetch(`/configs/${_whConfigId}/webhook`, {
+      method: "PUT",
+      body: JSON.stringify({ action: "generate" }),
+    });
+    document.getElementById("wh-secret-input").value = res.secret;
+    document.getElementById("wh-secret-input").type = "text";
+    toast("New secret generated — click Save to apply", "info");
+  } catch (e) {
+    toast("Error: " + e.message, "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function saveWhSecret() {
+  if (!_whConfigId) return;
+  const secret = document.getElementById("wh-secret-input").value.trim();
+  const btn = document.getElementById("wh-save-btn");
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  try {
+    await apiFetch(`/configs/${_whConfigId}/webhook`, {
+      method: "PUT",
+      body: JSON.stringify({ action: "save", secret }),
+    });
+    toast("Webhook secret saved", "success");
+    loadConfigs();
+  } catch (e) {
+    toast("Error: " + e.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Save Secret";
+  }
+}
+
+async function clearWhSecret() {
+  if (!_whConfigId) return;
+  if (!confirm("Remove the webhook secret? All incoming webhook requests will be accepted without validation.")) return;
+  try {
+    await apiFetch(`/configs/${_whConfigId}/webhook`, {
+      method: "PUT",
+      body: JSON.stringify({ action: "clear" }),
+    });
+    document.getElementById("wh-secret-input").value = "";
+    toast("Webhook secret cleared", "info");
+    loadConfigs();
+  } catch (e) {
+    toast("Error: " + e.message, "error");
+  }
+}
+
+async function copyWebhookUrl() {
+  const url = document.getElementById("wh-url").textContent;
+  await navigator.clipboard.writeText(url).catch(() => {});
+  const btn = document.getElementById("copy-url-btn");
+  const orig = btn.innerHTML;
+  btn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg> Copied!`;
+  setTimeout(() => { btn.innerHTML = orig; }, 2000);
+}
+
+async function copyWhSecret() {
+  const val = document.getElementById("wh-secret-input").value;
+  if (!val) { toast("No secret to copy", "info"); return; }
+  await navigator.clipboard.writeText(val).catch(() => {});
+  const btn = document.getElementById("copy-secret-btn");
+  const orig = btn.innerHTML;
+  btn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg> Copied!`;
+  setTimeout(() => { btn.innerHTML = orig; }, 2000);
+}
+
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { closeModal(); closeLogs(); closePw(); }
+  if (e.key === "Escape") { closeModal(); closeLogs(); closePw(); closeWh(); }
 });
 
 // Load user info

@@ -164,6 +164,108 @@
     </div>
   </div>
 
+  <!-- Webhook Modal -->
+  <div id="wh-overlay" class="modal-overlay hidden" onclick="closeWhIfOutside(event)">
+    <div class="modal modal-wide" role="dialog" style="max-width:640px">
+      <div class="modal-header">
+        <h2 id="wh-title">Webhook Setup</h2>
+        <button class="modal-close" onclick="closeWh()" aria-label="Close">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="wh-body">
+        <p class="wh-desc">Paste this URL into your GitHub or GitLab repository's webhook settings. When a push event fires, it will automatically trigger a sync.</p>
+
+        <div class="wh-section-label">Webhook URL</div>
+        <div class="copy-row">
+          <code id="wh-url" class="copy-code"></code>
+          <button class="btn btn-ghost btn-sm copy-btn" onclick="copyWebhookUrl()" id="copy-url-btn">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            Copy
+          </button>
+        </div>
+
+        <div class="wh-section-label" style="margin-top:18px">
+          Secret Key
+          <span class="label-hint">(recommended — validates the request is from your git host)</span>
+        </div>
+        <div id="wh-secret-area">
+          <div class="copy-row">
+            <div class="pw-wrap" style="flex:1">
+              <input type="password" id="wh-secret-input" class="copy-code" style="font-size:12px;padding:7px 36px 7px 10px" placeholder="No secret set — all requests accepted" />
+              <button type="button" class="pw-toggle" onclick="toggleWhSecret()">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
+            <button class="btn btn-ghost btn-sm" onclick="generateWhSecret()" title="Generate random secret">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+              Generate
+            </button>
+            <button class="btn btn-ghost btn-sm copy-btn" onclick="copyWhSecret()" id="copy-secret-btn">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              Copy
+            </button>
+          </div>
+          <div class="wh-secret-actions">
+            <button class="btn btn-primary btn-sm" onclick="saveWhSecret()" id="wh-save-btn">Save Secret</button>
+            <button class="btn btn-danger btn-sm" onclick="clearWhSecret()">Clear Secret</button>
+          </div>
+        </div>
+
+        <div class="wh-instructions">
+          <div class="wh-platform-tabs">
+            <button class="wh-ptab active" id="ptab-github" onclick="switchPlatform('github')">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.44 9.8 8.2 11.38.6.11.82-.26.82-.58v-2.02c-3.34.72-4.04-1.61-4.04-1.61-.54-1.38-1.33-1.75-1.33-1.75-1.09-.74.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.8 1.3 3.49 1 .11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 3-.4c1.02 0 2.04.13 3 .4 2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.81 5.63-5.48 5.92.43.37.81 1.1.81 2.22v3.29c0 .32.21.7.82.58C20.57 21.8 24 17.3 24 12c0-6.63-5.37-12-12-12z"/></svg>
+              GitHub
+            </button>
+            <button class="wh-ptab" id="ptab-gitlab" onclick="switchPlatform('gitlab')">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M22.65 14.39L12 22.13 1.35 14.39a.84.84 0 0 1-.3-.94l1.22-3.78 2.44-7.51A.42.42 0 0 1 4.82 2a.43.43 0 0 1 .58 0 .42.42 0 0 1 .11.18l2.44 7.49h8.1l2.44-7.51a.42.42 0 0 1 .11-.18.43.43 0 0 1 .58 0 .42.42 0 0 1 .11.18l2.44 7.51L23 13.45a.84.84 0 0 1-.35.94z"/></svg>
+              GitLab
+            </button>
+            <button class="wh-ptab" id="ptab-generic" onclick="switchPlatform('generic')">Generic</button>
+          </div>
+
+          <div id="instr-github" class="wh-instr-panel">
+            <ol class="instr-list">
+              <li>Go to your GitHub repo → <strong>Settings → Webhooks → Add webhook</strong></li>
+              <li>Paste the <strong>Webhook URL</strong> above into the <em>Payload URL</em> field</li>
+              <li>Set <em>Content type</em> to <code>application/json</code></li>
+              <li>Paste the <strong>Secret Key</strong> above into the <em>Secret</em> field</li>
+              <li>Choose <strong>Just the push event</strong> (or "Send me everything")</li>
+              <li>Check <strong>Active</strong> and click <em>Add webhook</em></li>
+            </ol>
+            <div class="instr-note">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+              GitSyncd validates the <code>X-Hub-Signature-256</code> header using HMAC-SHA256.
+            </div>
+          </div>
+
+          <div id="instr-gitlab" class="wh-instr-panel hidden">
+            <ol class="instr-list">
+              <li>Go to your GitLab repo → <strong>Settings → Webhooks</strong></li>
+              <li>Paste the <strong>Webhook URL</strong> above into the <em>URL</em> field</li>
+              <li>Paste the <strong>Secret Key</strong> above into the <em>Secret token</em> field</li>
+              <li>Check <strong>Push events</strong></li>
+              <li>Click <em>Add webhook</em></li>
+            </ol>
+            <div class="instr-note">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+              GitSyncd validates the <code>X-Gitlab-Token</code> header.
+            </div>
+          </div>
+
+          <div id="instr-generic" class="wh-instr-panel hidden">
+            <p style="font-size:13px;color:var(--text-muted);margin-bottom:10px">Send a <code>POST</code> request to the webhook URL. Include the secret in one of these headers:</p>
+            <div class="code-block">X-Hub-Signature-256: sha256=&lt;hmac-sha256-of-body&gt;  <span class="code-comment">← GitHub style</span>
+X-Gitlab-Token: &lt;your-secret&gt;                     <span class="code-comment">← GitLab style</span>
+X-Webhook-Secret: &lt;your-secret&gt;                    <span class="code-comment">← Generic</span></div>
+            <p style="font-size:12px;color:var(--text-subtle);margin-top:8px">If no secret is set, all POST requests trigger a sync.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Logs Modal -->
   <div id="logs-overlay" class="modal-overlay hidden" onclick="closeLogsIfOutside(event)">
     <div class="modal modal-wide" role="dialog">
