@@ -16,10 +16,30 @@
         <span class="brand-name">GitSyncd</span>
         <span class="brand-tag">Repo Sync Manager</span>
       </div>
-      <button class="btn btn-primary" onclick="openAddModal()">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        Add Sync
-      </button>
+      <div class="header-actions">
+        <button class="btn btn-primary" onclick="openAddModal()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add Sync
+        </button>
+        <div class="user-menu" id="user-menu">
+          <button class="user-btn" onclick="toggleUserMenu()" id="user-btn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+            <span id="user-label">Account</span>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          <div class="user-dropdown hidden" id="user-dropdown">
+            <button class="dropdown-item" onclick="openChangePassword()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+              Change Password
+            </button>
+            <div class="dropdown-divider"></div>
+            <button class="dropdown-item dropdown-item-danger" onclick="doLogout()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+              Sign Out
+            </button>
+          </div>
+        </div>
+      </div>
     </header>
 
     <main class="main">
@@ -30,14 +50,13 @@
         <p class="empty-title">No sync configurations yet</p>
         <p class="empty-sub">Click <strong>Add Sync</strong> to create your first repo sync.</p>
       </div>
-
       <div id="configs-grid" class="configs-grid"></div>
     </main>
   </div>
 
   <!-- Add / Edit Modal -->
   <div id="modal-overlay" class="modal-overlay hidden" onclick="closeModalIfOutside(event)">
-    <div class="modal" role="dialog" aria-modal="true">
+    <div class="modal modal-wide" role="dialog" aria-modal="true">
       <div class="modal-header">
         <h2 id="modal-title">Add Sync Configuration</h2>
         <button class="modal-close" onclick="closeModal()" aria-label="Close">
@@ -46,47 +65,97 @@
       </div>
       <form id="config-form" onsubmit="submitConfigForm(event)">
         <input type="hidden" id="edit-id" value="" />
+
+        <div class="form-section-title">Basic Info</div>
         <div class="form-group">
           <label for="f-name">Name</label>
           <input type="text" id="f-name" placeholder="e.g. Mirror main to backup" required />
         </div>
+
+        <div class="form-section-title">Source Repository</div>
         <div class="form-row">
           <div class="form-group">
             <label for="f-source-url">Source Repo URL</label>
-            <input type="text" id="f-source-url" placeholder="https://github.com/org/repo.git" required />
+            <input type="text" id="f-source-url" placeholder="https://github.com/org/repo.git or git@github.com:org/repo.git" required />
           </div>
           <div class="form-group form-group-sm">
             <label for="f-source-branch">Branch</label>
             <input type="text" id="f-source-branch" placeholder="main" value="main" />
           </div>
         </div>
+
         <div class="arrow-divider">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
         </div>
+
+        <div class="form-section-title">Destination Repository</div>
         <div class="form-row">
           <div class="form-group">
             <label for="f-dest-url">Destination Repo URL</label>
-            <input type="text" id="f-dest-url" placeholder="https://github.com/org/backup.git" required />
+            <input type="text" id="f-dest-url" placeholder="https://github.com/org/backup.git or git@github.com:org/backup.git" required />
           </div>
           <div class="form-group form-group-sm">
             <label for="f-dest-branch">Branch</label>
             <input type="text" id="f-dest-branch" placeholder="main" value="main" />
           </div>
         </div>
+
+        <div class="form-section-title">Authentication <span class="label-hint">(optional — for private repos)</span></div>
+        <div class="auth-tabs">
+          <button type="button" class="auth-tab active" id="tab-ssh" onclick="switchAuthTab('ssh')">SSH Key</button>
+          <button type="button" class="auth-tab" id="tab-https" onclick="switchAuthTab('https')">HTTPS Credentials</button>
+        </div>
+
+        <div id="auth-ssh" class="auth-panel">
+          <div class="form-group">
+            <label for="f-ssh-key">
+              Private SSH Key
+              <span class="label-hint">(paste the full contents of your private key file)</span>
+            </label>
+            <textarea id="f-ssh-key" rows="6" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----" spellcheck="false"></textarea>
+            <div id="ssh-key-status" class="key-status hidden"></div>
+          </div>
+        </div>
+
+        <div id="auth-https" class="auth-panel hidden">
+          <div class="form-row">
+            <div class="form-group">
+              <label for="f-git-username">Git Username / Token Name</label>
+              <input type="text" id="f-git-username" placeholder="your-github-username" autocomplete="off" />
+            </div>
+            <div class="form-group">
+              <label for="f-git-password">
+                Password / Access Token
+                <span id="pw-saved-badge" class="saved-badge hidden">saved</span>
+              </label>
+              <div class="pw-wrap">
+                <input type="password" id="f-git-password" placeholder="ghp_xxxx… or leave blank to keep saved" autocomplete="new-password" />
+                <button type="button" class="pw-toggle" onclick="toggleFormPw()" aria-label="Toggle">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                </button>
+              </div>
+              <span class="form-hint">Use a personal access token for GitHub/GitLab — not your account password.</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-section-title">Schedule <span class="label-hint">(optional)</span></div>
         <div class="form-group">
           <label for="f-schedule">
-            Schedule
-            <span class="label-hint">(optional — cron expression, e.g. <code>0 * * * *</code> for hourly)</span>
+            Cron Expression
+            <span class="label-hint">(e.g. <code>0 * * * *</code> = hourly, <code>0 0 * * *</code> = daily)</span>
           </label>
-          <input type="text" id="f-schedule" placeholder="0 * * * *  or leave blank for manual only" />
+          <input type="text" id="f-schedule" placeholder="leave blank for manual sync only" />
           <div class="cron-presets">
             <span class="preset-label">Presets:</span>
+            <button type="button" class="preset-btn" onclick="setCron('*/15 * * * *')">Every 15m</button>
             <button type="button" class="preset-btn" onclick="setCron('0 * * * *')">Hourly</button>
             <button type="button" class="preset-btn" onclick="setCron('0 0 * * *')">Daily</button>
             <button type="button" class="preset-btn" onclick="setCron('0 0 * * 0')">Weekly</button>
             <button type="button" class="preset-btn" onclick="setCron('')">None</button>
           </div>
         </div>
+
         <div class="modal-footer">
           <button type="button" class="btn btn-ghost" onclick="closeModal()">Cancel</button>
           <button type="submit" class="btn btn-primary" id="form-submit-btn">Create</button>
@@ -105,6 +174,37 @@
         </button>
       </div>
       <div id="logs-list" class="logs-list"></div>
+    </div>
+  </div>
+
+  <!-- Change Password Modal -->
+  <div id="pw-overlay" class="modal-overlay hidden" onclick="closePwIfOutside(event)">
+    <div class="modal" role="dialog" style="max-width:420px">
+      <div class="modal-header">
+        <h2>Change Password</h2>
+        <button class="modal-close" onclick="closePw()" aria-label="Close">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <form id="pw-form" onsubmit="submitPasswordChange(event)">
+        <div id="pw-error" class="login-error hidden" style="margin-bottom:4px"></div>
+        <div class="form-group">
+          <label for="pw-current">Current Password</label>
+          <input type="password" id="pw-current" placeholder="••••••••" required autocomplete="current-password" />
+        </div>
+        <div class="form-group">
+          <label for="pw-new">New Password</label>
+          <input type="password" id="pw-new" placeholder="at least 6 characters" required autocomplete="new-password" />
+        </div>
+        <div class="form-group">
+          <label for="pw-confirm">Confirm New Password</label>
+          <input type="password" id="pw-confirm" placeholder="repeat new password" required autocomplete="new-password" />
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost" onclick="closePw()">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="pw-submit-btn">Update Password</button>
+        </div>
+      </form>
     </div>
   </div>
 

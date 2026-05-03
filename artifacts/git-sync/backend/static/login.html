@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GitSyncd — Sign In</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body class="login-body">
+  <div class="login-wrap">
+    <div class="login-card">
+      <div class="login-brand">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="login-logo">
+          <circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/>
+          <path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" y1="9" x2="6" y2="21"/>
+        </svg>
+        <div>
+          <div class="login-brand-name">GitSyncd</div>
+          <div class="login-brand-sub">Repo Sync Manager</div>
+        </div>
+      </div>
+
+      <h1 class="login-title">Sign in</h1>
+      <p class="login-desc">Enter your credentials to access the dashboard.</p>
+
+      <div id="login-error" class="login-error hidden"></div>
+
+      <form id="login-form" onsubmit="doLogin(event)" autocomplete="on">
+        <div class="form-group">
+          <label for="l-username">Username</label>
+          <input type="text" id="l-username" name="username" autocomplete="username" placeholder="admin" required autofocus />
+        </div>
+        <div class="form-group">
+          <label for="l-password">Password</label>
+          <div class="pw-wrap">
+            <input type="password" id="l-password" name="password" autocomplete="current-password" placeholder="••••••••" required />
+            <button type="button" class="pw-toggle" onclick="togglePw()" aria-label="Toggle password visibility">
+              <svg id="pw-eye" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </div>
+        </div>
+        <button type="submit" class="btn btn-primary btn-full" id="login-btn">
+          Sign in
+        </button>
+      </form>
+
+      <p class="login-hint">Default credentials: <code>admin</code> / <code>admin123</code><br>Change your password after signing in.</p>
+    </div>
+  </div>
+
+  <script>
+    async function doLogin(e) {
+      e.preventDefault();
+      const btn = document.getElementById("login-btn");
+      const errEl = document.getElementById("login-error");
+      errEl.classList.add("hidden");
+      btn.disabled = true;
+      btn.textContent = "Signing in…";
+      const username = document.getElementById("l-username").value.trim();
+      const password = document.getElementById("l-password").value;
+      try {
+        const res = await fetch("/v1/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Login failed");
+        window.location.href = "/";
+      } catch (err) {
+        errEl.textContent = err.message;
+        errEl.classList.remove("hidden");
+        btn.disabled = false;
+        btn.textContent = "Sign in";
+      }
+    }
+
+    function togglePw() {
+      const input = document.getElementById("l-password");
+      input.type = input.type === "password" ? "text" : "password";
+    }
+  </script>
+</body>
+</html>
