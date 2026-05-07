@@ -50,8 +50,16 @@ function statusBadge(status) {
 
 function authBadges(c) {
   const badges = [];
-  if (c.has_ssh_key) badges.push(`<span class="auth-indicator" title="SSH key saved"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>SSH</span>`);
-  if (c.has_git_password) badges.push(`<span class="auth-indicator" title="HTTPS credentials saved"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>Token</span>`);
+  const sshIcon = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>`;
+  const tokenIcon = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`;
+  const hasSrcSsh = c.has_source_ssh_key || c.has_ssh_key;
+  const hasSrcPw = c.has_source_git_password || c.has_git_password;
+  const hasDstSsh = c.has_dest_ssh_key || c.has_ssh_key;
+  const hasDstPw = c.has_dest_git_password || c.has_git_password;
+  if (hasSrcSsh) badges.push(`<span class="auth-indicator" title="Source SSH key saved">${sshIcon}src</span>`);
+  if (hasSrcPw)  badges.push(`<span class="auth-indicator" title="Source HTTPS credentials saved">${tokenIcon}src</span>`);
+  if (hasDstSsh) badges.push(`<span class="auth-indicator" title="Destination SSH key saved">${sshIcon}dst</span>`);
+  if (hasDstPw)  badges.push(`<span class="auth-indicator" title="Destination HTTPS credentials saved">${tokenIcon}dst</span>`);
   return badges.join("");
 }
 
@@ -179,14 +187,14 @@ async function deleteConfig(id, name) {
   }
 }
 
-// Auth tab switching
-let activeAuthTab = "ssh";
-function switchAuthTab(tab) {
-  activeAuthTab = tab;
-  document.getElementById("auth-ssh").classList.toggle("hidden", tab !== "ssh");
-  document.getElementById("auth-https").classList.toggle("hidden", tab !== "https");
-  document.getElementById("tab-ssh").classList.toggle("active", tab === "ssh");
-  document.getElementById("tab-https").classList.toggle("active", tab === "https");
+// Auth tab switching (per-direction: 'src' or 'dst')
+const activeAuthTab = { src: "ssh", dst: "ssh" };
+function switchAuthTab(side, tab) {
+  activeAuthTab[side] = tab;
+  document.getElementById(`auth-${side}-ssh`).classList.toggle("hidden", tab !== "ssh");
+  document.getElementById(`auth-${side}-https`).classList.toggle("hidden", tab !== "https");
+  document.getElementById(`tab-${side}-ssh`).classList.toggle("active", tab === "ssh");
+  document.getElementById(`tab-${side}-https`).classList.toggle("active", tab === "https");
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
@@ -348,9 +356,12 @@ function openAddModal() {
   document.getElementById("form-submit-btn").textContent = "Create";
   document.getElementById("edit-id").value = "";
   document.getElementById("config-form").reset();
-  document.getElementById("pw-saved-badge").classList.add("hidden");
-  document.getElementById("ssh-key-status").classList.add("hidden");
-  switchAuthTab("ssh");
+  document.getElementById("src-pw-saved-badge").classList.add("hidden");
+  document.getElementById("dst-pw-saved-badge").classList.add("hidden");
+  document.getElementById("src-ssh-key-status").classList.add("hidden");
+  document.getElementById("dst-ssh-key-status").classList.add("hidden");
+  switchAuthTab("src", "ssh");
+  switchAuthTab("dst", "ssh");
   setBranchMappings([{ from: "main", to: "main" }]);
 
   // Pre-fill URL fields from default settings
@@ -382,28 +393,31 @@ async function openEditModal(id) {
     document.getElementById("f-dest-url").value = c.dest_url;
     document.getElementById("f-schedule").value = c.schedule || "";
     setBranchMappings(c.branches || [{ from: c.source_branch || "main", to: c.dest_branch || "main" }]);
-    document.getElementById("f-ssh-key").value = "";
-    document.getElementById("f-git-username").value = c.git_username || "";
-    document.getElementById("f-git-password").value = "";
+    document.getElementById("f-src-ssh-key").value = "";
+    document.getElementById("f-src-git-username").value = c.source_git_username || "";
+    document.getElementById("f-src-git-password").value = "";
+    document.getElementById("f-dst-ssh-key").value = "";
+    document.getElementById("f-dst-git-username").value = c.dest_git_username || "";
+    document.getElementById("f-dst-git-password").value = "";
 
-    const sshStatus = document.getElementById("ssh-key-status");
-    if (c.has_ssh_key) {
-      sshStatus.textContent = "SSH key is saved. Paste a new key to replace it, or leave blank to keep the existing one.";
-      sshStatus.className = "key-status key-status-saved";
-      sshStatus.classList.remove("hidden");
-    } else {
-      sshStatus.classList.add("hidden");
+    function setSshStatus(side, has) {
+      const el = document.getElementById(`${side}-ssh-key-status`);
+      if (has) {
+        el.textContent = "SSH key is saved. Paste a new key to replace it, or leave blank to keep the existing one.";
+        el.className = "key-status key-status-saved";
+        el.classList.remove("hidden");
+      } else {
+        el.classList.add("hidden");
+      }
     }
+    setSshStatus("src", c.has_source_ssh_key);
+    setSshStatus("dst", c.has_dest_ssh_key);
 
-    const pwBadge = document.getElementById("pw-saved-badge");
-    if (c.has_git_password) {
-      pwBadge.classList.remove("hidden");
-    } else {
-      pwBadge.classList.add("hidden");
-    }
+    document.getElementById("src-pw-saved-badge").classList.toggle("hidden", !c.has_source_git_password);
+    document.getElementById("dst-pw-saved-badge").classList.toggle("hidden", !c.has_dest_git_password);
 
-    const tab = c.has_git_password || c.git_username ? "https" : "ssh";
-    switchAuthTab(tab);
+    switchAuthTab("src", c.has_source_git_password || c.source_git_username ? "https" : "ssh");
+    switchAuthTab("dst", c.has_dest_git_password || c.dest_git_username ? "https" : "ssh");
 
     document.getElementById("modal-overlay").classList.remove("hidden");
   } catch (e) {
@@ -423,8 +437,8 @@ function setCron(val) {
   document.getElementById("f-schedule").value = val;
 }
 
-function toggleFormPw() {
-  const el = document.getElementById("f-git-password");
+function toggleFormPw(id) {
+  const el = document.getElementById(id || "f-src-git-password");
   el.type = el.type === "password" ? "text" : "password";
 }
 
@@ -441,18 +455,22 @@ async function submitConfigForm(e) {
     schedule: document.getElementById("f-schedule").value.trim() || null,
   };
 
-  if (activeAuthTab === "ssh") {
-    const key = document.getElementById("f-ssh-key").value.trim();
-    if (key) body.ssh_key = key;
-    else if (!editId) body.ssh_key = null;
-    body.git_username = null;
-    body.git_password = null;
-  } else {
-    body.git_username = document.getElementById("f-git-username").value.trim() || null;
-    const pw = document.getElementById("f-git-password").value;
-    if (pw) body.git_password = pw;
-    body.ssh_key = null;
+  function applyAuth(side, prefix) {
+    if (activeAuthTab[side] === "ssh") {
+      const key = document.getElementById(`f-${side}-ssh-key`).value.trim();
+      if (key) body[`${prefix}_ssh_key`] = key;
+      else if (!editId) body[`${prefix}_ssh_key`] = null;
+      body[`${prefix}_git_username`] = null;
+      body[`${prefix}_git_password`] = null;
+    } else {
+      body[`${prefix}_git_username`] = document.getElementById(`f-${side}-git-username`).value.trim() || null;
+      const pw = document.getElementById(`f-${side}-git-password`).value;
+      if (pw) body[`${prefix}_git_password`] = pw;
+      body[`${prefix}_ssh_key`] = null;
+    }
   }
+  applyAuth("src", "source");
+  applyAuth("dst", "dest");
 
   btn.disabled = true;
   btn.textContent = "Saving...";

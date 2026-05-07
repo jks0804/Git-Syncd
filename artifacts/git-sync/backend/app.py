@@ -88,11 +88,41 @@ def init_db():
         ("webhook_secret", "TEXT"),
         ("branches", "TEXT"),
         ("trigger", "TEXT NOT NULL DEFAULT 'manual'"),
+        ("source_ssh_key", "TEXT"),
+        ("source_git_username", "TEXT"),
+        ("source_git_password", "TEXT"),
+        ("dest_ssh_key", "TEXT"),
+        ("dest_git_username", "TEXT"),
+        ("dest_git_password", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE configs ADD COLUMN {col} {defn}")
         except Exception:
             pass
+    # One-time backfill: copy legacy single-credential columns into per-direction
+    # columns so existing configs keep working with the new split-credentials model.
+    # Gated by a settings marker so we never overwrite intentionally-cleared values
+    # on subsequent restarts.
+    try:
+        marker = conn.execute(
+            "SELECT value FROM settings WHERE key = 'split_creds_backfill_v1'"
+        ).fetchone()
+        if not marker:
+            conn.execute("""
+                UPDATE configs
+                   SET source_ssh_key      = COALESCE(source_ssh_key,      ssh_key),
+                       source_git_username = COALESCE(source_git_username, git_username),
+                       source_git_password = COALESCE(source_git_password, git_password),
+                       dest_ssh_key        = COALESCE(dest_ssh_key,        ssh_key),
+                       dest_git_username   = COALESCE(dest_git_username,   git_username),
+                       dest_git_password   = COALESCE(dest_git_password,   git_password)
+            """)
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('split_creds_backfill_v1', ?)",
+                (datetime.utcnow().isoformat(),),
+            )
+    except Exception:
+        pass
     try:
         conn.execute("ALTER TABLE logs ADD COLUMN trigger TEXT NOT NULL DEFAULT 'manual'")
     except Exception:
@@ -161,17 +191,43 @@ def build_git_env(ssh_key_text):
 def embed_credentials(url, username, password):
     if not username or not password:
         return url
-    from urllib.parse import urlparse, urlunparse
+    from urllib.parse import urlparse, urlunparse, quote
     parsed = urlparse(url)
     if parsed.scheme in ("http", "https"):
-        netloc = f"{username}:{password}@{parsed.hostname}"
+        u = quote(str(username), safe="")
+        p = quote(str(password), safe="")
+        netloc = f"{u}:{p}@{parsed.hostname}"
         if parsed.port:
             netloc += f":{parsed.port}"
         return urlunparse(parsed._replace(netloc=netloc))
     return url
 
 
-def _sync_branch_pair(src_branch, dst_branch, src_url, dst_url, git_env, work_dir, config, trigger, started_at, output_lines):
+def _redact_secrets(text, secrets):
+    """Replace any occurrence of provided secret strings with ***."""
+    if not text:
+        return text
+    out = text
+    seen = set()
+    for s in secrets:
+        if not s:
+            continue
+        for variant in (str(s), quote_plus_safe(str(s))):
+            if variant and variant not in seen and len(variant) >= 3:
+                out = out.replace(variant, "***")
+                seen.add(variant)
+    return out
+
+
+def quote_plus_safe(s):
+    from urllib.parse import quote
+    try:
+        return quote(s, safe="")
+    except Exception:
+        return s
+
+
+def _sync_branch_pair(src_branch, dst_branch, src_url, dst_url, src_env, dst_env, work_dir, config, trigger, started_at, output_lines):
     """Sync one branch pair. Returns True on success, False on error."""
     sep = "─" * 50
     output_lines.append(f"\n{sep}")
@@ -185,7 +241,7 @@ def _sync_branch_pair(src_branch, dst_branch, src_url, dst_url, git_env, work_di
     output_lines.append(f"[{datetime.utcnow().isoformat()}] Cloning source branch '{src_branch}'...")
     result = subprocess.run(
         ["git", "clone", "--branch", src_branch, "--depth", "1", src_url, source_dir],
-        capture_output=True, text=True, timeout=120, env=git_env,
+        capture_output=True, text=True, timeout=120, env=src_env,
     )
     output_lines.append((result.stdout + result.stderr).strip())
     if result.returncode != 0:
@@ -195,13 +251,13 @@ def _sync_branch_pair(src_branch, dst_branch, src_url, dst_url, git_env, work_di
     output_lines.append(f"[{datetime.utcnow().isoformat()}] Cloning destination branch '{dst_branch}'...")
     dest_result = subprocess.run(
         ["git", "clone", "--branch", dst_branch, dst_url, dest_dir],
-        capture_output=True, text=True, timeout=120, env=git_env,
+        capture_output=True, text=True, timeout=120, env=dst_env,
     )
     if dest_result.returncode != 0:
         output_lines.append(f"Destination branch '{dst_branch}' not found — cloning default branch...")
         dest_result2 = subprocess.run(
             ["git", "clone", dst_url, dest_dir],
-            capture_output=True, text=True, timeout=120, env=git_env,
+            capture_output=True, text=True, timeout=120, env=dst_env,
         )
         output_lines.append((dest_result2.stdout + dest_result2.stderr).strip())
         if dest_result2.returncode != 0:
@@ -252,7 +308,7 @@ def _sync_branch_pair(src_branch, dst_branch, src_url, dst_url, git_env, work_di
 
     push_result = subprocess.run(
         ["git", "push", "origin", f"HEAD:{dst_branch}"],
-        capture_output=True, text=True, cwd=dest_dir, timeout=120, env=git_env,
+        capture_output=True, text=True, cwd=dest_dir, timeout=120, env=dst_env,
     )
     output_lines.append((push_result.stdout + push_result.stderr).strip())
     if push_result.returncode != 0:
@@ -282,12 +338,28 @@ def run_sync(config_id: int, trigger: str = "manual"):
     output_lines = []
     any_error = False
     work_dir = tempfile.mkdtemp(prefix="gitsyncd_")
-    tmp_key_file = None
+    tmp_key_files = []
+    secrets_to_redact = []
+
+    def _cred(key, legacy_key):
+        return config.get(key) or config.get(legacy_key)
 
     try:
-        git_env, tmp_key_file = build_git_env(config.get("ssh_key"))
-        src_url = embed_credentials(config["source_url"], config.get("git_username"), config.get("git_password"))
-        dst_url = embed_credentials(config["dest_url"], config.get("git_username"), config.get("git_password"))
+        src_ssh = _cred("source_ssh_key", "ssh_key")
+        dst_ssh = _cred("dest_ssh_key", "ssh_key")
+        src_user = _cred("source_git_username", "git_username")
+        src_pass = _cred("source_git_password", "git_password")
+        dst_user = _cred("dest_git_username", "git_username")
+        dst_pass = _cred("dest_git_password", "git_password")
+        secrets_to_redact = [src_pass, dst_pass]
+
+        src_env, src_kf = build_git_env(src_ssh)
+        dst_env, dst_kf = build_git_env(dst_ssh)
+        if src_kf: tmp_key_files.append(src_kf)
+        if dst_kf: tmp_key_files.append(dst_kf)
+
+        src_url = embed_credentials(config["source_url"], src_user, src_pass)
+        dst_url = embed_credentials(config["dest_url"], dst_user, dst_pass)
 
         output_lines.append(f"[{started_at}] Trigger: {trigger}")
         output_lines.append(f"[{started_at}] Source:  {config['source_url']}")
@@ -300,7 +372,7 @@ def run_sync(config_id: int, trigger: str = "manual"):
             ok = _sync_branch_pair(
                 src_branch, dst_branch,
                 src_url, dst_url,
-                git_env, work_dir, config,
+                src_env, dst_env, work_dir, config,
                 trigger, started_at, output_lines,
             )
             if not ok:
@@ -313,13 +385,17 @@ def run_sync(config_id: int, trigger: str = "manual"):
         output_lines.append(f"\nFATAL ERROR: {str(e)}")
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
-        if tmp_key_file and os.path.exists(tmp_key_file):
-            os.unlink(tmp_key_file)
+        for kf in tmp_key_files:
+            if kf and os.path.exists(kf):
+                try:
+                    os.unlink(kf)
+                except Exception:
+                    pass
 
     status = "error" if any_error else "success"
 
     finished_at = datetime.utcnow().isoformat()
-    full_output = "\n".join(output_lines).strip()
+    full_output = _redact_secrets("\n".join(output_lines).strip(), secrets_to_redact)
 
     conn2 = get_db()
     conn2.execute(
@@ -523,16 +599,25 @@ def _get_branches(row):
 
 def _safe_config(row):
     d = dict(row)
-    d.pop("git_password", None)
-    d.pop("ssh_key", None)
-    d.pop("webhook_secret", None)
-    d.pop("branches", None)
-    has_ssh = bool(row["ssh_key"]) if "ssh_key" in row.keys() else False
-    has_pass = bool(row["git_password"]) if "git_password" in row.keys() else False
-    has_webhook = bool(row["webhook_secret"]) if "webhook_secret" in row.keys() else False
-    d["has_ssh_key"] = has_ssh
-    d["has_git_password"] = has_pass
-    d["has_webhook_secret"] = has_webhook
+    keys = row.keys()
+    def _has(col):
+        return bool(row[col]) if col in keys else False
+    # Strip secret material from response
+    for k in (
+        "git_password", "ssh_key", "webhook_secret", "branches",
+        "source_ssh_key", "source_git_password",
+        "dest_ssh_key", "dest_git_password",
+    ):
+        d.pop(k, None)
+    # Legacy flags (kept for back-compat with existing UI code)
+    d["has_ssh_key"] = _has("ssh_key")
+    d["has_git_password"] = _has("git_password")
+    d["has_webhook_secret"] = _has("webhook_secret")
+    # Per-direction flags
+    d["has_source_ssh_key"] = _has("source_ssh_key")
+    d["has_source_git_password"] = _has("source_git_password")
+    d["has_dest_ssh_key"] = _has("dest_ssh_key")
+    d["has_dest_git_password"] = _has("dest_git_password")
     d["branches"] = _get_branches(row)
     return d
 
@@ -565,11 +650,16 @@ def create_config():
     first_src = branches[0]["from"]
     first_dst = branches[0]["to"]
 
+    def _s(k):
+        return (data.get(k) or "").strip() or None
     cur = conn.execute(
         """INSERT INTO configs
            (name, source_url, source_branch, dest_url, dest_branch, branches, schedule,
-            ssh_key, git_username, git_password, webhook_secret, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ssh_key, git_username, git_password, webhook_secret,
+            source_ssh_key, source_git_username, source_git_password,
+            dest_ssh_key, dest_git_username, dest_git_password,
+            created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             data["name"].strip(),
             data["source_url"].strip(),
@@ -577,11 +667,17 @@ def create_config():
             data["dest_url"].strip(),
             first_dst,
             json.dumps(branches),
-            (data.get("schedule") or "").strip() or None,
-            (data.get("ssh_key") or "").strip() or None,
-            (data.get("git_username") or "").strip() or None,
-            (data.get("git_password") or "").strip() or None,
-            (data.get("webhook_secret") or "").strip() or None,
+            _s("schedule"),
+            _s("ssh_key"),
+            _s("git_username"),
+            _s("git_password"),
+            _s("webhook_secret"),
+            _s("source_ssh_key"),
+            _s("source_git_username"),
+            _s("source_git_password"),
+            _s("dest_ssh_key"),
+            _s("dest_git_username"),
+            _s("dest_git_password"),
             datetime.utcnow().isoformat(),
         ),
     )
@@ -629,6 +725,12 @@ def update_config(config_id):
     ssh_key = _pick("ssh_key", row["ssh_key"])
     git_username = _pick("git_username", row["git_username"])
     git_password = _pick("git_password", row["git_password"])
+    source_ssh_key = _pick("source_ssh_key", row["source_ssh_key"])
+    source_git_username = _pick("source_git_username", row["source_git_username"])
+    source_git_password = _pick("source_git_password", row["source_git_password"])
+    dest_ssh_key = _pick("dest_ssh_key", row["dest_ssh_key"])
+    dest_git_username = _pick("dest_git_username", row["dest_git_username"])
+    dest_git_password = _pick("dest_git_password", row["dest_git_password"])
 
     # Branch mappings
     raw_branches = data.get("branches")
@@ -641,9 +743,15 @@ def update_config(config_id):
 
     conn.execute(
         """UPDATE configs SET name=?, source_url=?, source_branch=?, dest_url=?, dest_branch=?,
-           branches=?, schedule=?, ssh_key=?, git_username=?, git_password=? WHERE id=?""",
+           branches=?, schedule=?, ssh_key=?, git_username=?, git_password=?,
+           source_ssh_key=?, source_git_username=?, source_git_password=?,
+           dest_ssh_key=?, dest_git_username=?, dest_git_password=?
+           WHERE id=?""",
         (name, source_url, first_src, dest_url, first_dst,
-         json.dumps(branches), schedule, ssh_key, git_username, git_password, config_id),
+         json.dumps(branches), schedule, ssh_key, git_username, git_password,
+         source_ssh_key, source_git_username, source_git_password,
+         dest_ssh_key, dest_git_username, dest_git_password,
+         config_id),
     )
     conn.commit()
     updated = conn.execute("SELECT * FROM configs WHERE id = ?", (config_id,)).fetchone()

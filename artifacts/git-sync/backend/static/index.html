@@ -102,41 +102,80 @@
           Add Branch Mapping
         </button>
 
-        <div class="form-section-title">Authentication <span class="label-hint">(optional — for private repos)</span></div>
+        <div class="form-section-title">Source Authentication <span class="label-hint">(optional — for private source repo)</span></div>
         <div class="auth-tabs">
-          <button type="button" class="auth-tab active" id="tab-ssh" onclick="switchAuthTab('ssh')">SSH Key</button>
-          <button type="button" class="auth-tab" id="tab-https" onclick="switchAuthTab('https')">HTTPS Credentials</button>
+          <button type="button" class="auth-tab active" id="tab-src-ssh" onclick="switchAuthTab('src','ssh')">SSH Key</button>
+          <button type="button" class="auth-tab" id="tab-src-https" onclick="switchAuthTab('src','https')">HTTPS Credentials</button>
         </div>
 
-        <div id="auth-ssh" class="auth-panel">
+        <div id="auth-src-ssh" class="auth-panel">
           <div class="form-group">
-            <label for="f-ssh-key">
+            <label for="f-src-ssh-key">
               Private SSH Key
-              <span class="label-hint">(paste the full contents of your private key file)</span>
+              <span class="label-hint">(used to clone the source repo)</span>
             </label>
-            <textarea id="f-ssh-key" rows="6" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----" spellcheck="false"></textarea>
-            <div id="ssh-key-status" class="key-status hidden"></div>
+            <textarea id="f-src-ssh-key" rows="5" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----" spellcheck="false"></textarea>
+            <div id="src-ssh-key-status" class="key-status hidden"></div>
           </div>
         </div>
 
-        <div id="auth-https" class="auth-panel hidden">
+        <div id="auth-src-https" class="auth-panel hidden">
           <div class="form-row">
             <div class="form-group">
-              <label for="f-git-username">Git Username / Token Name</label>
-              <input type="text" id="f-git-username" placeholder="your-github-username" autocomplete="off" />
+              <label for="f-src-git-username">Source Username</label>
+              <input type="text" id="f-src-git-username" placeholder="your-source-username" autocomplete="off" />
             </div>
             <div class="form-group">
-              <label for="f-git-password">
-                Password / Access Token
-                <span id="pw-saved-badge" class="saved-badge hidden">saved</span>
+              <label for="f-src-git-password">
+                Source Password / Access Token
+                <span id="src-pw-saved-badge" class="saved-badge hidden">saved</span>
               </label>
               <div class="pw-wrap">
-                <input type="password" id="f-git-password" placeholder="ghp_xxxx… or leave blank to keep saved" autocomplete="new-password" />
-                <button type="button" class="pw-toggle" onclick="toggleFormPw()" aria-label="Toggle">
+                <input type="password" id="f-src-git-password" placeholder="token… or leave blank to keep saved" autocomplete="new-password" />
+                <button type="button" class="pw-toggle" onclick="toggleFormPw('f-src-git-password')" aria-label="Toggle">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                 </button>
               </div>
-              <span class="form-hint">Use a personal access token for GitHub/GitLab — not your account password.</span>
+              <span class="form-hint">Use a personal access token for GitHub/GitLab/Gitea — not your account password.</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-section-title">Destination Authentication <span class="label-hint">(optional — for private destination repo)</span></div>
+        <div class="auth-tabs">
+          <button type="button" class="auth-tab active" id="tab-dst-ssh" onclick="switchAuthTab('dst','ssh')">SSH Key</button>
+          <button type="button" class="auth-tab" id="tab-dst-https" onclick="switchAuthTab('dst','https')">HTTPS Credentials</button>
+        </div>
+
+        <div id="auth-dst-ssh" class="auth-panel">
+          <div class="form-group">
+            <label for="f-dst-ssh-key">
+              Private SSH Key
+              <span class="label-hint">(used to push to the destination repo)</span>
+            </label>
+            <textarea id="f-dst-ssh-key" rows="5" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----" spellcheck="false"></textarea>
+            <div id="dst-ssh-key-status" class="key-status hidden"></div>
+          </div>
+        </div>
+
+        <div id="auth-dst-https" class="auth-panel hidden">
+          <div class="form-row">
+            <div class="form-group">
+              <label for="f-dst-git-username">Destination Username</label>
+              <input type="text" id="f-dst-git-username" placeholder="your-destination-username" autocomplete="off" />
+            </div>
+            <div class="form-group">
+              <label for="f-dst-git-password">
+                Destination Password / Access Token
+                <span id="dst-pw-saved-badge" class="saved-badge hidden">saved</span>
+              </label>
+              <div class="pw-wrap">
+                <input type="password" id="f-dst-git-password" placeholder="token… or leave blank to keep saved" autocomplete="new-password" />
+                <button type="button" class="pw-toggle" onclick="toggleFormPw('f-dst-git-password')" aria-label="Toggle">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                </button>
+              </div>
+              <span class="form-hint">Use a personal access token for GitHub/GitLab/Gitea — not your account password.</span>
             </div>
           </div>
         </div>
