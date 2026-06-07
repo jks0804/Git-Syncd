@@ -175,8 +175,9 @@
   }
   tbody tr:last-child td { border-bottom: none; }
   tbody tr:hover { background: rgba(255,255,255,0.015); }
-  td.actions { text-align: right; white-space: nowrap; }
+  td.actions { text-align: right; white-space: nowrap; position: relative; }
   td.actions form, td.actions a { margin-left: 0.4rem; }
+  td.actions details.force-zone { margin-left: 0.4rem; }
   td.actions form:first-child, td.actions a:first-child { margin-left: 0; }
 
   /* === Buttons ========================================================== */
@@ -426,6 +427,40 @@
   /* Misc */
   .muted { color: var(--text-muted); }
   .mono { font-family: var(--mono); }
+
+  /* === Danger zone (gated force-push) =================================== */
+  details.force-zone { display: inline-block; position: relative; }
+  details.force-zone > summary {
+    list-style: none; cursor: pointer; display: inline-block;
+  }
+  details.force-zone > summary::-webkit-details-marker { display: none; }
+  details.force-zone > summary::marker { content: ""; }
+  .force-pop {
+    margin-top: 0.5rem;
+    border: 1px solid rgba(255,107,107,.35);
+    border-radius: 6px;
+    background: var(--danger-soft);
+    padding: 0.75rem 0.85rem;
+    max-width: 360px;
+  }
+  /* On the jobs table, float the popover so it doesn't stretch the row. */
+  td.actions details.force-zone[open] > .force-pop {
+    position: absolute; right: 0; z-index: 20;
+    background: var(--surface-2);
+    box-shadow: 0 6px 22px rgba(0,0,0,.45);
+  }
+  .force-pop .force-title {
+    color: var(--danger); font-weight: 600; font-size: 0.8rem;
+    text-transform: uppercase; letter-spacing: .04em; margin: 0 0 0.4rem;
+  }
+  .force-pop .force-check {
+    display: flex; gap: 0.5rem; align-items: flex-start;
+    font-size: 0.82rem; color: var(--text); margin-bottom: 0.6rem;
+    text-align: left; line-height: 1.35; cursor: pointer;
+  }
+  .force-pop .force-check input { margin-top: 0.15rem; }
+  .btn[disabled] { opacity: 0.45; cursor: not-allowed; }
+  .btn[disabled]:hover { background: transparent; border-color: var(--border); }
 </style>
 </head>
 <body>
@@ -451,5 +486,30 @@
   {% endwith %}
   {% block content %}{% endblock %}
 </main>
+<script>
+  // Danger-zone gating: a button stays disabled until its paired confirmation
+  // checkbox is ticked. Delegated so any number of force zones work without
+  // per-instance scripts. Pair via: checkbox.class="force-confirm"
+  // data-target="<id>"  ->  button id="<id>".
+  document.addEventListener("change", function (e) {
+    var cb = e.target;
+    if (cb && cb.classList && cb.classList.contains("force-confirm")) {
+      var btn = document.getElementById(cb.dataset.target);
+      if (btn) btn.disabled = !cb.checked;
+    }
+  });
+  // Re-lock the checkbox/button whenever a force-zone disclosure is closed,
+  // so a half-confirmed state can't linger after collapsing it.
+  document.addEventListener("toggle", function (e) {
+    var d = e.target;
+    if (d && d.tagName === "DETAILS" && d.classList.contains("force-zone") && !d.open) {
+      d.querySelectorAll(".force-confirm").forEach(function (cb) {
+        cb.checked = false;
+        var btn = document.getElementById(cb.dataset.target);
+        if (btn) btn.disabled = true;
+      });
+    }
+  }, true);
+</script>
 </body>
 </html>

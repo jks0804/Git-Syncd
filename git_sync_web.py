@@ -138,9 +138,10 @@ def parse_job_form(form) -> dict:
     storage = form.get("storage", "")
     if storage == "local":
         local = form.get("local", "").strip()
-        if not local:
-            raise ValueError("Local path is required when storage is 'local'.")
-        job["local"] = local
+        # Empty path is allowed: the sync falls back to a stable auto-generated
+        # cache dir under the system temp dir. Only emit the key when set.
+        if local:
+            job["local"] = local
     elif storage == "transient":
         job["transient"] = True
     else:
@@ -154,6 +155,16 @@ def parse_job_form(form) -> dict:
         branches = [b.strip() for b in raw.replace("\n", ",").split(",") if b.strip()]
         if not branches:
             raise ValueError("Specify at least one branch name.")
+        # Each entry is a branch name, optionally "source:destination" to rename
+        # on push. Validate the spec shape here so errors show before saving.
+        for spec in branches:
+            if spec.count(":") > 1:
+                raise ValueError(
+                    f"Invalid branch '{spec}': use 'source:destination' "
+                    "with at most one colon."
+                )
+            if ":" in spec and not spec.replace(":", "").strip():
+                raise ValueError(f"Invalid branch '{spec}': no branch name given.")
         job["branches"] = branches
     elif selector == "mirror":
         job["mirror"] = True
@@ -234,9 +245,9 @@ def selector_for(job: dict) -> str:
 def storage_for(job: dict) -> str:
     if job.get("transient"):
         return "transient"
-    if job.get("local"):
-        return "local"
-    return ""
+    # Local is the default: an explicit local path, or neither key set (which
+    # means a persistent cache at an auto-generated path).
+    return "local"
 
 
 def is_valid_job_name(name: str) -> bool:
@@ -247,8 +258,13 @@ def is_valid_job_name(name: str) -> bool:
 # Subprocess: run a sync
 # ---------------------------------------------------------------------------
 
-def run_sync(job_name: str, dry_run: bool = False) -> tuple[int, str]:
-    """Invoke git_sync.py for one job. Returns (returncode, combined_output)."""
+def run_sync(job_name: str, dry_run: bool = False, force: bool = False) -> tuple[int, str]:
+    """Invoke git_sync.py for one job. Returns (returncode, combined_output).
+
+    force=True adds --force, which overrides the job's own setting for this run
+    only (git_sync applies --force to the job in config mode). This is the
+    destructive overwrite the web "danger zone" gates behind a confirmation.
+    """
     if not SYNC_SCRIPT.is_file():
         return 127, f"git_sync.py not found at {SYNC_SCRIPT}"
 
@@ -260,6 +276,8 @@ def run_sync(job_name: str, dry_run: bool = False) -> tuple[int, str]:
     ]
     if dry_run:
         cmd.append("--dry-run")
+    if force:
+        cmd.append("--force")
 
     try:
         result = subprocess.run(
@@ -470,11 +488,13 @@ def run_job_view(name):
     if name not in config["jobs"]:
         abort(404)
     dry_run = request.form.get("dry_run") == "on"
-    rc, output = run_sync(name, dry_run=dry_run)
+    force = request.form.get("force") == "on"
+    rc, output = run_sync(name, dry_run=dry_run, force=force)
     return render_template(
         "run_result.html",
         name=name,
         dry_run=dry_run,
+        force=force,
         returncode=rc,
         output=output,
     )

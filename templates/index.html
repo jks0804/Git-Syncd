@@ -59,6 +59,22 @@
           <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}">
           <button type="submit" class="btn btn-sm btn-primary">run</button>
         </form>
+        <details class="force-zone">
+          <summary class="btn btn-sm btn-danger" title="Force-push (overwrite destination)">force…</summary>
+          <div class="force-pop">
+            <p class="force-title">⚠ Danger zone</p>
+            <form method="post" action="{{ url_for('run_job_view', name=name) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}">
+              <input type="hidden" name="force" value="on">
+              <label class="force-check">
+                <input type="checkbox" class="force-confirm" data-target="fbtn-{{ name }}">
+                <span>Force-push <strong class="mono">{{ name }}</strong>, overwriting refs on the
+                  destination. Commits on the destination that aren't in the source can be lost.</span>
+              </label>
+              <button id="fbtn-{{ name }}" type="submit" class="btn btn-sm btn-danger" disabled>Force-push now</button>
+            </form>
+          </div>
+        </details>
         <a href="{{ url_for('edit_job', name=name) }}" class="btn btn-sm">edit</a>
         <form method="post" action="{{ url_for('delete_job', name=name) }}" class="inline"
               onsubmit="return confirm('Delete job {{ name }}? The local cache directory (if any) is NOT removed.')">

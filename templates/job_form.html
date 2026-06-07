@@ -69,10 +69,12 @@
     </div>
     <div id="local-path-group" style="margin-top: 0.75rem;">
       <label class="field">
-        <span class="label">Local cache path</span>
+        <span class="label">Local cache path <span class="muted">(optional)</span></span>
         <input type="text" name="local" value="{{ job.local or '' }}"
                placeholder="~/.cache/git-sync/myrepo">
-        <p class="help">Directory will be created if needed. Supports <code>~</code> and <code>${VAR}</code>.</p>
+        <p class="help">Directory will be created if needed. Supports <code>~</code> and <code>${VAR}</code>.
+           Leave blank to use an auto-generated, reusable cache dir under the system temp dir
+           (a stable path derived from the source URL).</p>
       </label>
     </div>
   </fieldset>
@@ -110,8 +112,14 @@
         <span class="label">Branch names</span>
         <input type="text" name="branches"
                value="{% if job.branches is iterable and job.branches is not string %}{{ job.branches|join(', ') }}{% else %}{{ job.branches or '' }}{% endif %}"
-               placeholder="main, develop, release">
-        <p class="help">Comma-separated. Branch names that don't exist on source will fail loudly.</p>
+               placeholder="main, develop, release  —  or  main:master">
+        <p class="help">
+          Comma-separated. Branch names that don't exist on source will fail loudly.
+          To push to a differently named branch on the destination, use
+          <code>source:destination</code> — e.g. <code>main:master</code> sends source
+          <code>main</code> to destination <code>master</code>. A plain name keeps the
+          same name on both ends.
+        </p>
       </label>
     </div>
   </fieldset>

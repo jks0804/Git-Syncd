@@ -4,9 +4,9 @@
 
 <div class="toolbar">
   <h2>
-    {% if dry_run %}Dry-run{% else %}Sync{% endif %}: <span class="mono">{{ name }}</span>
+    {% if dry_run %}Dry-run{% else %}Sync{% endif %}: <span class="mono">{{ name }}</span>{% if force %} <span class="badge badge-mirror">forced</span>{% endif %}
     <span class="subtitle">
-      {% if returncode == 0 %}exit 0 — {% if dry_run %}dry-run{% else %}sync{% endif %} completed successfully{% else %}exit {{ returncode }} — failed{% endif %}
+      {% if returncode == 0 %}exit 0 — {% if dry_run %}dry-run{% else %}sync{% endif %}{% if force %} (forced){% endif %} completed successfully{% else %}exit {{ returncode }} — failed{% endif %}
     </span>
   </h2>
   <div class="actions-bar">
@@ -26,15 +26,41 @@
   <form method="post" action="{{ url_for('run_job_view', name=name) }}" class="inline">
     <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}">
     {% if dry_run %}<input type="hidden" name="dry_run" value="on">{% endif %}
-    <button type="submit" class="btn btn-primary">run again {% if dry_run %}(dry){% endif %}</button>
+    {% if force %}<input type="hidden" name="force" value="on">{% endif %}
+    <button type="submit" class="btn btn-primary">run again {% if dry_run %}(dry){% endif %}{% if force %} (forced){% endif %}</button>
   </form>
   {% if dry_run and returncode == 0 %}
   <form method="post" action="{{ url_for('run_job_view', name=name) }}" class="inline">
     <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}">
-    <button type="submit" class="btn">run for real</button>
+    {% if force %}<input type="hidden" name="force" value="on">{% endif %}
+    <button type="submit" class="btn">run for real{% if force %} (forced){% endif %}</button>
   </form>
   {% endif %}
   <a href="{{ url_for('edit_job', name=name) }}" class="btn">edit job</a>
 </div>
+
+{% if returncode != 0 and not force %}
+<div class="force-pop" style="max-width: 560px; margin-top: 1.25rem;">
+  <p class="force-title">⚠ Danger zone — force-push</p>
+  <p class="help" style="margin-top: 0;">
+    If this failed with <code>! [rejected] … (fetch first)</code>, the destination has commits that
+    aren't in the source. Force-pushing overwrites the destination's refs to match the source —
+    <strong>commits that exist only on the destination can be lost.</strong> Only do this if the
+    destination is meant to mirror the source.
+  </p>
+  <form method="post" action="{{ url_for('run_job_view', name=name) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}">
+    <input type="hidden" name="force" value="on">
+    {% if dry_run %}<input type="hidden" name="dry_run" value="on">{% endif %}
+    <label class="force-check">
+      <input type="checkbox" class="force-confirm" data-target="fbtn-retry">
+      <span>Yes, force-push <strong class="mono">{{ name }}</strong>{% if dry_run %} (dry-run preview){% endif %} and overwrite the destination.</span>
+    </label>
+    <button id="fbtn-retry" type="submit" class="btn btn-sm btn-danger" disabled>
+      {% if dry_run %}Preview force-push (dry-run){% else %}Force-push now{% endif %}
+    </button>
+  </form>
+</div>
+{% endif %}
 
 {% endblock %}

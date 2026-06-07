@@ -79,10 +79,10 @@ Provide source, destination, where to do the work, and what to sync.
 | --- | --- |
 | `--source URL` | Source repo URL or path. Required. |
 | `--dest URL` | Destination repo URL or path. Required. |
-| `--local PATH` | Use a persistent bare mirror at `PATH`. Re-runs fetch only deltas. |
+| `--local PATH` | Use a persistent bare mirror at `PATH`. Re-runs fetch only deltas. If omitted (and `--transient` is not set), a stable cache dir is auto-generated under the system temp dir. |
 | `--transient` | Clone into a temp directory that is deleted afterwards. |
 | `--all-branches` | Sync every branch from source. |
-| `--branches a,b,c` | Sync only the listed branches. |
+| `--branches a,b,c` | Sync only the listed branches. Use `source:destination` to push to a differently named branch, e.g. `main:master`. |
 | `--mirror` | Full mirror push: every ref (branches, tags, notes). **Destructive on destination** — refs that exist there but not in source are deleted. |
 | `--ssh-key PATH` | Path to an SSH private key. Sets `GIT_SSH_COMMAND` for this run. |
 | `--no-tags` | Skip tag push. Ignored when `--mirror` is set. |
@@ -90,7 +90,7 @@ Provide source, destination, where to do the work, and what to sync.
 | `--dry-run` | Show what `git push` would do without making changes. |
 | `-v`, `--verbose` | Verbose logging including each `git` command. |
 
-You must specify exactly one of `--all-branches`, `--branches`, or `--mirror`, and exactly one of `--local` or `--transient`.
+You must specify exactly one of `--all-branches`, `--branches`, or `--mirror`. Storage is optional: pass `--local PATH` for a named persistent mirror, `--transient` for a temp dir deleted afterwards, or neither to get a persistent cache at an auto-generated, reusable path under the system temp dir (`--local` and `--transient` are mutually exclusive).
 
 #### Examples
 
@@ -199,10 +199,10 @@ Valid in both `[defaults]` and inside any `[jobs.<name>]` block:
 | --- | --- | --- |
 | `source` | string | Source repo URL or path. **Required** per job. Supports `${VAR}` env-var substitution. |
 | `dest` | string | Destination repo URL or path. **Required** per job. Supports `${VAR}` env-var substitution. |
-| `local` | string | Persistent local mirror path. `~` is expanded. Mutually exclusive with `transient`. Supports `${VAR}`. |
+| `local` | string | Persistent local mirror path. `~` is expanded. Mutually exclusive with `transient`. Supports `${VAR}`. If omitted (and `transient` is not set), a stable cache dir is auto-generated under the system temp dir, derived from the source URL and reused across runs. |
 | `transient` | bool | Use a temp directory deleted after the sync. Mutually exclusive with `local`. |
 | `all_branches` | bool | Sync every branch from source. |
-| `branches` | list&lt;string&gt; | Sync only the listed branch names. |
+| `branches` | list&lt;string&gt; | Sync only the listed branches. Each entry is a branch name, or `"source:destination"` to push to a differently named branch (e.g. `"main:master"`). A plain name keeps the same name on both ends. |
 | `mirror` | bool | Full mirror push (all refs). **Destructive on destination.** |
 | `tags` | bool | Push tags (default `true`). Ignored when `mirror = true`. |
 | `force` | bool | Force-push (default `false`). |
@@ -212,7 +212,26 @@ Valid in both `[defaults]` and inside any `[jobs.<name>]` block:
 | `dest_token` | string | Token for the destination remote only. Overrides `token`. |
 | `token_user` | string | Username paired with the token (default `oauth2`). GitHub accepts any non-empty value; GitLab expects `oauth2`. |
 
-Each job must specify exactly one of `all_branches`, `branches`, or `mirror`, and exactly one of `local` or `transient`. Unknown keys are rejected with an error listing the valid options, so typos surface immediately.
+Each job must specify exactly one of `all_branches`, `branches`, or `mirror`. Storage is optional: set `local`, set `transient = true`, or set neither to use an auto-generated persistent cache under the system temp dir (`local` and `transient` remain mutually exclusive). Unknown keys are rejected with an error listing the valid options, so typos surface immediately.
+
+#### Renaming branches on the destination
+
+In `branches` mode, each entry can map a source branch to a different destination branch using `source:destination` syntax. This is useful when the two repos don't agree on branch names (for example, source uses `main` but the destination's default is `master`):
+
+```toml
+[jobs.cross-named]
+source   = "https://codebase.example.net/me/PANTHEON"
+dest     = "https://github.com/me/PANTHEON"
+branches = ["main:master", "develop"]   # main -> master; develop -> develop
+```
+
+- A plain name (`"develop"`) keeps the same name on both ends.
+- `"main:master"` pushes the source's `main` onto the destination's `master`.
+- Only the colon form needs both names; if one side is omitted (`"main:"` or `":main"`) it defaults to the side you typed.
+
+The same syntax works on the CLI: `--branches main:master,develop`.
+
+> **Note — this is distinct from a non-fast-forward rejection.** If a push fails with `! [rejected] main -> main (fetch first)`, the destination branch already contains commits that aren't in the source (commonly because the destination repo was created with an auto-generated README/initial commit). Renaming to an *empty* destination branch sidesteps it, but if you actually want the destination branch to match the source, set `force = true` to overwrite it. Branch renaming and `force` solve different problems.
 
 #### Environment variable substitution
 
@@ -511,6 +530,10 @@ In config mode, individual job failures don't abort the run — every job is att
 For interactive management, the project ships a small Flask-based web UI (`git_sync_web.py`) that reads and writes the same TOML config file the CLI uses. It exposes a dashboard listing every job with run/dry-run/edit/delete controls, a form for creating and editing jobs, and a defaults editor. Sync output is captured and displayed inline.
 
 The UI is intended for **internal, single-user use** — there is no account creation, just one set of credentials configured via environment variables.
+
+#### Forcing a push from the UI (danger zone)
+
+Each job row has a **force…** control, and a failed run result shows a contextual force panel. Both add `--force` to that one run only — they do **not** change the job's saved config. Because a force-push can overwrite (and lose) commits on the destination, the button stays disabled until you tick the confirmation checkbox. Use this when a run fails with `! [rejected] … (fetch first)` and you want the destination overwritten to match the source. The force panel also works with dry-run (on the result page) to preview a forced update without pushing.
 
 ### Setup
 

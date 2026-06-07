@@ -4,11 +4,15 @@ git_sync.py — Sync one git repository to another.
 
 Modes:
   --local PATH    Keep a persistent bare mirror at PATH (faster on re-runs).
+  (neither flag)  Persistent mirror at an auto-generated, stable cache dir
+                  under the system temp dir (reused across runs per source).
   --transient     Use a temp directory that is deleted when finished.
 
 Branch selection (pick one):
   --all-branches          Sync every branch from source.
-  --branches main,dev     Sync only the listed branches.
+  --branches main,dev     Sync only the listed branches. Each entry may rename
+                          the branch on the destination with a colon:
+                          --branches main:master,dev   (source:destination).
   --mirror                Full mirror push: every ref (branches, tags, notes,
                           remote-tracking) — destructive on destination.
 
@@ -52,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import logging
 import os
 import re
@@ -288,6 +293,60 @@ def list_local_branches(local_path: Path) -> list[str]:
     return [b.strip() for b in result.stdout.splitlines() if b.strip()]
 
 
+def has_local_tags(local_path: Path) -> bool:
+    """True if the bare mirror has any tags (refs/tags/*).
+
+    Used to skip the tags push when there's nothing to push: `git push --tags`
+    against a remote with no refs in common errors with "No refs in common and
+    none specified; doing nothing" instead of being a harmless no-op, which
+    otherwise makes a dry-run to a fresh destination fail spuriously.
+    """
+    result = subprocess.run(
+        ["git", "for-each-ref", "--format=%(refname)", "refs/tags/"],
+        cwd=str(local_path), text=True, capture_output=True, check=True,
+    )
+    return bool(result.stdout.strip())
+
+
+def parse_branch_mapping(entries: list[str]) -> list[tuple[str, str]]:
+    """Turn branch entries into (source, destination) name pairs.
+
+    Each entry maps a source branch to a destination branch:
+      "main"          -> ("main", "main")        same name on both ends
+      "main:master"   -> ("main", "master")      rename while syncing
+      "main:"         -> ("main", "main")         trailing colon: default dest
+      ":master"       -> ("master", "master")     leading colon: default source
+
+    When only one side is given, the other defaults to it — so you only need
+    the colon form when the names genuinely differ. At most one ':' is allowed.
+    Empty entries are skipped; an entry with no usable name is an error.
+    """
+    mapping: list[tuple[str, str]] = []
+    for raw in entries:
+        spec = raw.strip()
+        if not spec:
+            continue
+        if spec.count(":") > 1:
+            raise RuntimeError(
+                f"Invalid branch spec {raw!r}: use 'source:destination' "
+                "with at most one colon."
+            )
+        if ":" in spec:
+            src, _, dst = spec.partition(":")
+            src, dst = src.strip(), dst.strip()
+            if not src and not dst:
+                raise RuntimeError(f"Invalid branch spec {raw!r}: no branch name given.")
+            # Default the missing side to the side that was typed.
+            src = src or dst
+            dst = dst or src
+        else:
+            src = dst = spec
+        mapping.append((src, dst))
+    if not mapping:
+        raise RuntimeError("No branch names given.")
+    return mapping
+
+
 def push(local_path: Path, *, branches: list[str] | None, mirror: bool,
          all_branches: bool, tags: bool, force: bool, dry_run: bool) -> None:
     """Push selected refs to the destination remote."""
@@ -311,30 +370,58 @@ def push(local_path: Path, *, branches: list[str] | None, mirror: bool,
         refspecs = [f"refs/heads/{b}:refs/heads/{b}" for b in available]
         run(base + refspecs, cwd=local_path)
     elif branches:
+        mapping = parse_branch_mapping(branches)
         available = set(list_local_branches(local_path))
-        missing = [b for b in branches if b not in available]
+        missing = [src for src, _ in mapping if src not in available]
         if missing:
             raise RuntimeError(
                 f"Branch(es) not found in source: {', '.join(missing)}. "
                 f"Available: {', '.join(sorted(available))}"
             )
-        logging.info("Pushing branch(es): %s", ", ".join(branches))
-        refspecs = [f"refs/heads/{b}:refs/heads/{b}" for b in branches]
+        pretty = ", ".join(f"{src} -> {dst}" if src != dst else src
+                           for src, dst in mapping)
+        logging.info("Pushing branch(es): %s", pretty)
+        refspecs = [f"refs/heads/{src}:refs/heads/{dst}" for src, dst in mapping]
         run(base + refspecs, cwd=local_path)
 
     if tags:
-        logging.info("Pushing tags...")
-        tag_cmd = ["git", "push", "destination", "--tags"]
-        if dry_run:
-            tag_cmd.append("--dry-run")
-        if force:
-            tag_cmd.append("--force")
-        run(tag_cmd, cwd=local_path)
+        if not has_local_tags(local_path):
+            logging.info("No tags in source; skipping tag push.")
+        else:
+            logging.info("Pushing tags...")
+            tag_cmd = ["git", "push", "destination", "--tags"]
+            if dry_run:
+                tag_cmd.append("--dry-run")
+            if force:
+                tag_cmd.append("--force")
+            run(tag_cmd, cwd=local_path)
 
 
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
+
+# Where auto-generated persistent caches live when a job picks local storage
+# but doesn't specify a path.
+DEFAULT_CACHE_ROOT = Path(tempfile.gettempdir()) / "git-sync-cache"
+
+
+def default_cache_path(source: str) -> Path:
+    """Derive a stable per-source cache directory under the system temp dir.
+
+    Used as the fallback when local (persistent) storage is selected but no
+    path is given. The path is deterministic for a given source URL, so
+    re-runs reuse the same mirror and fetch only deltas. A short hash of the
+    source keeps distinct sources from colliding even if their readable
+    slugs match.
+    """
+    # Human-readable slug from the last path segment of the source.
+    tail = source.rstrip("/").rsplit("/", 1)[-1]
+    tail = tail[:-4] if tail.endswith(".git") else tail
+    slug = re.sub(r"[^A-Za-z0-9._-]", "-", tail).strip("-") or "repo"
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:8]
+    return DEFAULT_CACHE_ROOT / f"{slug}-{digest}"
+
 
 def sync(
     source: str,
@@ -359,9 +446,13 @@ def sync(
             cleanup = Path(tempfile.mkdtemp(prefix="git-sync-"))
             local_path = cleanup
             logging.info("Using transient working dir: %s", local_path)
-        else:
-            assert local, "local path required when not transient"
+        elif local:
             local_path = Path(local).expanduser().resolve()
+        else:
+            # Local (persistent) storage with no path given: fall back to a
+            # stable, reusable cache dir under the system temp dir.
+            local_path = default_cache_path(source).resolve()
+            logging.info("No local path set; using generated cache dir: %s", local_path)
 
         token_creds = [
             (source, source_token, token_user),
@@ -420,7 +511,9 @@ all_branches = true
 source    = "git@github.com:me/docs.git"
 dest      = "git@gitlab.com:me/docs.git"
 transient = true
-branches  = ["main", "release"]
+# "source:destination" renames a branch on the way over; a plain name keeps it.
+# Here source 'main' lands on destination 'master', and 'release' stays as-is.
+branches  = ["main:master", "release"]
 tags      = false
 
 # Use a specific SSH key for this job (does not affect other jobs).
@@ -558,8 +651,8 @@ def run_job(name: str, params: dict, *, force_override: bool, dry_run: bool, no_
     transient = bool(params.get("transient", False))
     if transient and local:
         raise RuntimeError(f"Job '{name}': 'transient' and 'local' are mutually exclusive.")
-    if not transient and not local:
-        raise RuntimeError(f"Job '{name}': must set either 'local' or 'transient = true'.")
+    # Neither set -> persistent local cache at an auto-generated path under
+    # the system temp dir (see default_cache_path / sync()).
 
     selectors = [bool(params.get("all_branches")), bool(params.get("branches")), bool(params.get("mirror"))]
     if sum(selectors) != 1:
@@ -568,10 +661,15 @@ def run_job(name: str, params: dict, *, force_override: bool, dry_run: bool, no_
         )
 
     branches = params.get("branches")
-    if branches is not None and (
-        not isinstance(branches, list) or not all(isinstance(b, str) for b in branches)
-    ):
-        raise RuntimeError(f"Job '{name}': 'branches' must be a list of strings.")
+    if branches is not None:
+        if not isinstance(branches, list) or not all(isinstance(b, str) for b in branches):
+            raise RuntimeError(f"Job '{name}': 'branches' must be a list of strings.")
+        # Validate the source:destination specs now so typos surface with the
+        # job name rather than mid-push.
+        try:
+            parse_branch_mapping(branches)
+        except RuntimeError as e:
+            raise RuntimeError(f"Job '{name}': {e}") from e
 
     sync(
         source=source,
@@ -612,12 +710,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # CLI (one-shot) mode
     p.add_argument("--source", help="Source repo URL or path.")
     p.add_argument("--dest", help="Destination repo URL or path.")
-    p.add_argument("--local", help="Persistent local mirror path.")
+    p.add_argument("--local", help="Persistent local mirror path. If omitted (and "
+                                   "--transient is not set), a stable cache dir is "
+                                   "auto-generated under the system temp dir.")
     p.add_argument("--transient", action="store_true",
                    help="Use a temp dir that is deleted after the sync.")
     p.add_argument("--all-branches", action="store_true",
                    help="Sync every branch from source.")
-    p.add_argument("--branches", help="Comma-separated branch list to sync.")
+    p.add_argument("--branches", help="Comma-separated branch list to sync. Use "
+                                      "'source:destination' to push to a differently "
+                                      "named branch, e.g. main:master,dev.")
     p.add_argument("--mirror", action="store_true",
                    help="Full mirror push (all refs). Destructive on destination.")
     p.add_argument("--ssh-key", help="Path to SSH private key to use for this sync.")
@@ -672,10 +774,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         # CLI mode: enforce the same requirements as before.
         if not args.source or not args.dest:
             p.error("--source and --dest are required (or use --config).")
-        if not (args.local or args.transient):
-            p.error("Either --local PATH or --transient is required.")
         if args.local and args.transient:
             p.error("--local and --transient are mutually exclusive.")
+        # Neither flag -> persistent local cache at an auto-generated path
+        # under the system temp dir.
         n_selectors = sum([args.all_branches, bool(args.branches), args.mirror])
         if n_selectors == 0:
             p.error("Specify one of: --all-branches, --branches, or --mirror.")
