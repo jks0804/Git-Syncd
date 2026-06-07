@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+{% block title %}{{ action_label|lower }} — git_sync{% endblock %}
+{% block content %}
+
+<div class="toolbar">
+  <h2>
+    {% if name_editable %}New sync job{% else %}Edit job: <span class="mono">{{ name }}</span>{% endif %}
+    <span class="subtitle">
+      {% if name_editable %}configure source, destination, and what to sync{% else %}saving overwrites the entry in the config file{% endif %}
+    </span>
+  </h2>
+  <div class="actions-bar">
+    <a href="{{ url_for('index') }}" class="btn">← back</a>
+  </div>
+</div>
+
+<form method="post" action="{{ form_action }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}">
+
+  {% if name_editable %}
+  <fieldset>
+    <legend>Identity</legend>
+    <label class="field">
+      <span class="label">Job name</span>
+      <input type="text" name="name" value="{{ name }}" required pattern="[A-Za-z0-9_-]+" autofocus>
+      <p class="help">Letters, digits, dashes, underscores. Becomes the key in <code>[jobs.&lt;name&gt;]</code>.</p>
+    </label>
+  </fieldset>
+  {% endif %}
+
+  <fieldset>
+    <legend>Repository</legend>
+    <label class="field">
+      <span class="label">Source URL</span>
+      <input type="text" name="source" value="{{ job.source or '' }}" required
+             placeholder="git@github.com:me/repo.git">
+    </label>
+    <label class="field">
+      <span class="label">Destination URL</span>
+      <input type="text" name="dest" value="{{ job.dest or '' }}" required
+             placeholder="git@gitlab.com:me/repo.git">
+      <p class="help">
+        SSH (<code>git@host:me/repo.git</code>) or HTTPS (<code>https://host/me/repo.git</code>).
+        Both fields support <code>${VAR}</code> environment-variable substitution at sync time.
+        For HTTPS auth, use the access-token fields below rather than embedding credentials in the URL.
+      </p>
+    </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Storage</legend>
+    <div class="radio-row">
+      <label>
+        <input type="radio" name="storage" value="local"
+               {% if storage == 'local' %}checked{% endif %} onchange="toggleStorage()">
+        <span>
+          Persistent local cache
+          <span class="radio-meta">re-runs fetch only deltas — recommended for cron / repeated syncs</span>
+        </span>
+      </label>
+      <label>
+        <input type="radio" name="storage" value="transient"
+               {% if storage == 'transient' %}checked{% endif %} onchange="toggleStorage()">
+        <span>
+          Transient temp directory
+          <span class="radio-meta">no local footprint — full clone every run</span>
+        </span>
+      </label>
+    </div>
+    <div id="local-path-group" style="margin-top: 0.75rem;">
+      <label class="field">
+        <span class="label">Local cache path</span>
+        <input type="text" name="local" value="{{ job.local or '' }}"
+               placeholder="~/.cache/git-sync/myrepo">
+        <p class="help">Directory will be created if needed. Supports <code>~</code> and <code>${VAR}</code>.</p>
+      </label>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Branch selection</legend>
+    <div class="radio-row">
+      <label>
+        <input type="radio" name="selector" value="all_branches"
+               {% if selector == 'all_branches' %}checked{% endif %} onchange="toggleSelector()">
+        <span>
+          All branches
+          <span class="radio-meta">push every branch from source — additive, no deletes</span>
+        </span>
+      </label>
+      <label>
+        <input type="radio" name="selector" value="branches"
+               {% if selector == 'branches' %}checked{% endif %} onchange="toggleSelector()">
+        <span>
+          Specific branches
+          <span class="radio-meta">push only the names you list</span>
+        </span>
+      </label>
+      <label>
+        <input type="radio" name="selector" value="mirror"
+               {% if selector == 'mirror' %}checked{% endif %} onchange="toggleSelector()">
+        <span>
+          Full mirror
+          <span class="radio-warning">! destructive on destination — refs absent on source are deleted</span>
+        </span>
+      </label>
+    </div>
+    <div id="branches-group" style="margin-top: 0.75rem;">
+      <label class="field">
+        <span class="label">Branch names</span>
+        <input type="text" name="branches"
+               value="{% if job.branches is iterable and job.branches is not string %}{{ job.branches|join(', ') }}{% else %}{{ job.branches or '' }}{% endif %}"
+               placeholder="main, develop, release">
+        <p class="help">Comma-separated. Branch names that don't exist on source will fail loudly.</p>
+      </label>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Authentication & options</legend>
+    <label class="field">
+      <span class="label">SSH key path <span class="muted">(optional)</span></span>
+      <input type="text" name="ssh_key" value="{{ job.ssh_key or '' }}"
+             placeholder="~/.ssh/git_sync_key">
+      <p class="help">Sets <code>GIT_SSH_COMMAND</code> for this job only. Supports <code>${VAR}</code>. For SSH remotes.</p>
+    </label>
+
+    <label class="field">
+      <span class="label">HTTPS access token <span class="muted">(optional)</span></span>
+      <input type="text" name="token" value="{{ job.token or '' }}"
+             placeholder="ghp_… or ${GITHUB_TOKEN}" autocomplete="off">
+      <p class="help">
+        For HTTPS remotes. Applies to both source and destination. May be a literal token or a
+        <code>${VAR}</code> reference. Fed to git via a per-host credential helper — never written
+        into the remote URL or the command line. Use the per-end fields below if source and
+        destination need different tokens.
+      </p>
+    </label>
+    <label class="field">
+      <span class="label">Source token <span class="muted">(optional, overrides above)</span></span>
+      <input type="text" name="source_token" value="{{ job.source_token or '' }}"
+             placeholder="${SRC_TOKEN}" autocomplete="off">
+    </label>
+    <label class="field">
+      <span class="label">Destination token <span class="muted">(optional, overrides above)</span></span>
+      <input type="text" name="dest_token" value="{{ job.dest_token or '' }}"
+             placeholder="${DEST_TOKEN}" autocomplete="off">
+    </label>
+    <label class="field">
+      <span class="label">Token username <span class="muted">(optional)</span></span>
+      <input type="text" name="token_user" value="{{ job.token_user or '' }}"
+             placeholder="oauth2" autocomplete="off">
+      <p class="help">Username paired with the token. Defaults to <code>oauth2</code>. GitHub accepts any non-empty value; GitLab expects <code>oauth2</code>.</p>
+    </label>
+
+    <div class="checkbox-row">
+      <label>
+        <input type="checkbox" name="tags" {% if job.tags is not defined or job.tags %}checked{% endif %}>
+        <span>Push tags
+          <span class="radio-meta">ignored when full mirror is selected (mirror always pushes everything)</span>
+        </span>
+      </label>
+      <label>
+        <input type="checkbox" name="force" {% if job.force %}checked{% endif %}>
+        <span>Force push
+          <span class="radio-meta">overwrites refs on destination — use only when destination should mirror source</span>
+        </span>
+      </label>
+    </div>
+  </fieldset>
+
+  <div class="form-actions">
+    <button type="submit" class="btn btn-primary">{{ action_label }}</button>
+    <a href="{{ url_for('index') }}" class="btn">Cancel</a>
+  </div>
+</form>
+
+<script>
+function toggleStorage() {
+  let v = '';
+  for (const r of document.querySelectorAll('input[name="storage"]')) if (r.checked) v = r.value;
+  document.getElementById('local-path-group').style.display = (v === 'local') ? 'block' : 'none';
+}
+function toggleSelector() {
+  let v = '';
+  for (const r of document.querySelectorAll('input[name="selector"]')) if (r.checked) v = r.value;
+  document.getElementById('branches-group').style.display = (v === 'branches') ? 'block' : 'none';
+}
+toggleStorage();
+toggleSelector();
+</script>
+
+{% endblock %}

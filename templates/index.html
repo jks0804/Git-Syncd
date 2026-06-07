@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}jobs — git_sync{% endblock %}
+{% block content %}
+
+<div class="toolbar">
+  <h2>
+    Sync jobs
+    <span class="subtitle">{{ jobs|length }} configured · click "run" to execute</span>
+  </h2>
+  <div class="actions-bar">
+    <a href="{{ url_for('new_job') }}" class="btn btn-primary">+ New job</a>
+  </div>
+</div>
+
+{% if jobs %}
+<table>
+  <thead>
+    <tr>
+      <th style="width: 14%;">Name</th>
+      <th>Source → Destination</th>
+      <th style="width: 14%;">Scope</th>
+      <th style="width: 14%;">Storage</th>
+      <th style="width: 22%;"></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for name, job in jobs.items() %}
+    <tr>
+      <td><strong class="mono">{{ name }}</strong></td>
+      <td>
+        <div class="src-dest">
+          <div class="url">{{ job.source }}</div>
+          <div class="url-dest"><span class="arrow">→</span>{{ job.dest }}</div>
+        </div>
+      </td>
+      <td>
+        {% if job.mirror %}
+          <span class="badge badge-mirror">mirror</span>
+        {% elif job.branches %}
+          <span class="badge badge-branches">{{ job.branches|length }} branch{% if job.branches|length != 1 %}es{% endif %}</span>
+        {% elif job.all_branches %}
+          <span class="badge badge-all">all branches</span>
+        {% endif %}
+      </td>
+      <td class="mono" style="font-size: 0.82rem;">
+        {% if job.transient %}
+          <span class="muted">transient</span>
+        {% else %}
+          <code>{{ job.local }}</code>
+        {% endif %}
+      </td>
+      <td class="actions">
+        <form method="post" action="{{ url_for('run_job_view', name=name) }}" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}">
+          <input type="hidden" name="dry_run" value="on">
+          <button type="submit" class="btn btn-sm" title="Preview without pushing">dry-run</button>
+        </form>
+        <form method="post" action="{{ url_for('run_job_view', name=name) }}" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}">
+          <button type="submit" class="btn btn-sm btn-primary">run</button>
+        </form>
+        <a href="{{ url_for('edit_job', name=name) }}" class="btn btn-sm">edit</a>
+        <form method="post" action="{{ url_for('delete_job', name=name) }}" class="inline"
+              onsubmit="return confirm('Delete job {{ name }}? The local cache directory (if any) is NOT removed.')">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}">
+          <button type="submit" class="btn btn-sm btn-danger">delete</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">
+  <p>// no jobs configured yet</p>
+  <a href="{{ url_for('new_job') }}" class="btn btn-primary">Create your first job</a>
+</div>
+{% endif %}
+
+{% if defaults %}
+<p class="footer-note">
+  defaults active:
+  {% for key, val in defaults.items() %}
+    <code>{{ key }}={{ val|lower if val is boolean else val }}</code>{% if not loop.last %}, {% endif %}
+  {% endfor %}
+</p>
+{% endif %}
+
+<p class="footer-note">config: <code>{{ config_path }}</code></p>
+
+{% endblock %}

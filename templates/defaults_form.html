@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}defaults — git_sync{% endblock %}
+{% block content %}
+
+<div class="toolbar">
+  <h2>
+    Defaults
+    <span class="subtitle">applied to every job; each job can override these values</span>
+  </h2>
+  <div class="actions-bar">
+    <a href="{{ url_for('index') }}" class="btn">← back</a>
+  </div>
+</div>
+
+<form method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}">
+
+  <fieldset>
+    <legend>Default behaviour</legend>
+    <div class="checkbox-row">
+      <label>
+        <input type="checkbox" name="tags_default" {% if defaults.tags is defined and not defaults.tags %}checked{% endif %}>
+        <span>
+          Skip tags by default
+          <span class="radio-meta">when checked, jobs that don't explicitly set <code>tags = true</code> won't push tags</span>
+        </span>
+      </label>
+      <label>
+        <input type="checkbox" name="force_default" {% if defaults.force %}checked{% endif %}>
+        <span>
+          Force push by default
+          <span class="radio-meta">individual jobs can still set <code>force = false</code> to opt out</span>
+        </span>
+      </label>
+    </div>
+    <p class="help">
+      Defaults are stored in the <code>[defaults]</code> table of the config file.
+      A job's own settings always win — these only fill in values a job leaves unspecified.
+    </p>
+  </fieldset>
+
+  <div class="form-actions">
+    <button type="submit" class="btn btn-primary">Save defaults</button>
+    <a href="{{ url_for('index') }}" class="btn">Cancel</a>
+  </div>
+</form>
+
+{% endblock %}

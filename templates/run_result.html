@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}{{ name }} — sync result{% endblock %}
+{% block content %}
+
+<div class="toolbar">
+  <h2>
+    {% if dry_run %}Dry-run{% else %}Sync{% endif %}: <span class="mono">{{ name }}</span>
+    <span class="subtitle">
+      {% if returncode == 0 %}exit 0 — {% if dry_run %}dry-run{% else %}sync{% endif %} completed successfully{% else %}exit {{ returncode }} — failed{% endif %}
+    </span>
+  </h2>
+  <div class="actions-bar">
+    <a href="{{ url_for('index') }}" class="btn">← back to jobs</a>
+  </div>
+</div>
+
+{% if returncode == 0 %}
+<div class="flash flash-success">Completed successfully{% if dry_run %} (dry run — no changes pushed){% endif %}.</div>
+{% else %}
+<div class="flash flash-error">Sync failed with exit code {{ returncode }}. Output below.</div>
+{% endif %}
+
+<pre class="output">{{ output }}</pre>
+
+<div class="form-actions" style="border-top: none; padding-top: 0.5rem;">
+  <form method="post" action="{{ url_for('run_job_view', name=name) }}" class="inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}">
+    {% if dry_run %}<input type="hidden" name="dry_run" value="on">{% endif %}
+    <button type="submit" class="btn btn-primary">run again {% if dry_run %}(dry){% endif %}</button>
+  </form>
+  {% if dry_run and returncode == 0 %}
+  <form method="post" action="{{ url_for('run_job_view', name=name) }}" class="inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}">
+    <button type="submit" class="btn">run for real</button>
+  </form>
+  {% endif %}
+  <a href="{{ url_for('edit_job', name=name) }}" class="btn">edit job</a>
+</div>
+
+{% endblock %}
