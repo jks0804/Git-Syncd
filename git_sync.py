@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 stroh <jstroh@ltgc.com>
+#
+# This program is free software: you can redistribute it and/or modify it under
+# the terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later
+# version. This program is distributed WITHOUT ANY WARRANTY; see the GNU
+# General Public License (LICENSE file) for more details.
 """
 git_sync.py — Sync one git repository to another.
 
@@ -20,6 +28,9 @@ Other useful flags:
   --no-tags     Skip pushing tags (ignored with --mirror, which always pushes everything).
   --force       Force-push to destination.
   --dry-run     Print what git would do without actually pushing.
+  --source-hash / --dest-hash  sha1|sha256. When they differ, history is
+                bridged (fast-export|fast-import) into the destination's hash —
+                commit IDs are re-created and signatures stripped.
   -v            Verbose logging.
 
 Examples:
@@ -423,6 +434,96 @@ def default_cache_path(source: str) -> Path:
     return DEFAULT_CACHE_ROOT / f"{slug}-{digest}"
 
 
+# ---------------------------------------------------------------------------
+# Cross-hash bridging (SHA-1 <-> SHA-256)
+# ---------------------------------------------------------------------------
+#
+# git cannot push/fetch between repositories that use different object hash
+# algorithms ("the receiving end does not support this repository's hash
+# algorithm"). To sync e.g. a SHA-256 Gitea repo to a SHA-1 GitHub repo, we
+# re-stream history through `git fast-export | git fast-import` into an
+# intermediate repo of the destination's hash, then push that. This RE-CREATES
+# history in the new hash: commit IDs change and signatures are stripped, but
+# trees, blobs, messages, branches and tags are preserved. Marks files make
+# re-syncs incremental.
+
+VALID_HASHES = {"sha1", "sha256"}
+
+
+def repo_object_format(repo_path: Path) -> str:
+    """Return a repo's object hash algorithm ('sha1' or 'sha256')."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-object-format"],
+        cwd=str(repo_path), text=True, capture_output=True, check=True,
+    )
+    return result.stdout.strip()
+
+
+def _has_any_refs(repo_path: Path) -> bool:
+    result = subprocess.run(
+        ["git", "for-each-ref", "--count=1"],
+        cwd=str(repo_path), text=True, capture_output=True, check=True,
+    )
+    return bool(result.stdout.strip())
+
+
+def ensure_bridge_repo(bridge_path: Path, object_format: str) -> None:
+    """Create (if absent) a bare repo of object_format to fast-import into."""
+    if is_bare_mirror(bridge_path):
+        return
+    if bridge_path.exists() and any(bridge_path.iterdir()):
+        raise RuntimeError(
+            f"{bridge_path} exists and is not a bridge repo. "
+            "Refusing to overwrite."
+        )
+    bridge_path.mkdir(parents=True, exist_ok=True)
+    logging.info("Creating %s bridge repo at %s", object_format, bridge_path)
+    run(["git", "init", "--bare", f"--object-format={object_format}", str(bridge_path)])
+
+
+def bridge_history(mirror_path: Path, bridge_path: Path,
+                   marks_src: Path, marks_dst: Path, *, incremental: bool) -> None:
+    """Re-stream all history from mirror_path into bridge_path (different hash).
+
+    Runs `git fast-export | git fast-import`. With incremental=True, both ends
+    resume from their marks files so only new commits are processed; otherwise
+    a full re-export is done (still correct — fast-import is deterministic, so
+    re-created commit IDs match — just slower).
+    """
+    export_cmd = ["git", "-C", str(mirror_path), "fast-export", "--all",
+                  "--signed-tags=strip", "--tag-of-filtered-object=rewrite"]
+    import_cmd = ["git", "-C", str(bridge_path), "fast-import", "--quiet", "--force"]
+    if incremental:
+        export_cmd += [f"--import-marks={marks_src}"]
+        import_cmd += [f"--import-marks={marks_dst}"]
+    export_cmd += [f"--export-marks={marks_src}"]
+    import_cmd += [f"--export-marks={marks_dst}"]
+
+    logging.info("Bridging history into %s repo (re-hashing objects%s)...",
+                 repo_object_format(bridge_path),
+                 ", incremental" if incremental else "")
+    logging.debug("$ %s | %s", " ".join(export_cmd), " ".join(import_cmd))
+
+    exporter = subprocess.Popen(export_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    importer = subprocess.Popen(import_cmd, stdin=exporter.stdout, stderr=subprocess.PIPE)
+    # Let the exporter receive SIGPIPE if the importer dies.
+    assert exporter.stdout is not None
+    exporter.stdout.close()
+    _, imp_err = importer.communicate()
+    exporter.wait()
+    exp_err = exporter.stderr.read() if exporter.stderr else b""
+    if exporter.returncode:
+        raise RuntimeError(
+            f"git fast-export failed (exit {exporter.returncode}): "
+            f"{exp_err.decode(errors='replace').strip()}"
+        )
+    if importer.returncode:
+        raise RuntimeError(
+            f"git fast-import failed (exit {importer.returncode}): "
+            f"{imp_err.decode(errors='replace').strip()}"
+        )
+
+
 def sync(
     source: str,
     dest: str,
@@ -439,12 +540,23 @@ def sync(
     source_token: str | None = None,
     dest_token: str | None = None,
     token_user: str | None = None,
+    source_hash: str | None = None,
+    dest_hash: str | None = None,
 ) -> None:
-    cleanup: Path | None = None
+    for label, h in (("source_hash", source_hash), ("dest_hash", dest_hash)):
+        if h is not None and h not in VALID_HASHES:
+            raise RuntimeError(
+                f"{label} must be one of {sorted(VALID_HASHES)}, got {h!r}."
+            )
+    # Bridge only when both ends are declared AND differ. Same/!declared -> the
+    # normal exact mirror-push path (unchanged behaviour).
+    bridge_needed = bool(source_hash and dest_hash and source_hash != dest_hash)
+
+    cleanup_paths: list[Path] = []
     try:
         if transient:
-            cleanup = Path(tempfile.mkdtemp(prefix="git-sync-"))
-            local_path = cleanup
+            local_path = Path(tempfile.mkdtemp(prefix="git-sync-"))
+            cleanup_paths.append(local_path)
             logging.info("Using transient working dir: %s", local_path)
         elif local:
             local_path = Path(local).expanduser().resolve()
@@ -460,10 +572,30 @@ def sync(
         ]
         with ssh_key_env(ssh_key), token_credentials(token_creds):
             ensure_mirror(local_path, source)
-            set_destination(local_path, dest)
             fetch_source(local_path)
+
+            # Validate the declared source hash against the real repo so a
+            # wrong dropdown choice fails clearly instead of mid-push.
+            if source_hash:
+                actual = repo_object_format(local_path)
+                if actual != source_hash:
+                    raise RuntimeError(
+                        f"Declared source hash is {source_hash!r} but the source "
+                        f"repository is actually {actual!r}. Correct the job's "
+                        "source hash."
+                    )
+
+            if bridge_needed:
+                push_repo = _build_bridge(
+                    local_path, dest_hash, transient=transient,
+                    cleanup_paths=cleanup_paths,
+                )
+            else:
+                push_repo = local_path
+
+            set_destination(push_repo, dest)
             push(
-                local_path,
+                push_repo,
                 branches=branches,
                 mirror=mirror,
                 all_branches=all_branches,
@@ -471,11 +603,57 @@ def sync(
                 force=force,
                 dry_run=dry_run,
             )
-        logging.info("Sync complete.%s", " (dry-run)" if dry_run else "")
+        logging.info(
+            "Sync complete.%s%s",
+            f" (bridged {source_hash}→{dest_hash}, commit IDs re-created)" if bridge_needed else "",
+            " (dry-run)" if dry_run else "",
+        )
     finally:
-        if cleanup is not None and cleanup.exists():
-            logging.info("Removing transient dir %s", cleanup)
-            shutil.rmtree(cleanup, ignore_errors=True)
+        for path in cleanup_paths:
+            if not path.exists():
+                continue
+            logging.info("Removing transient path %s", path)
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+
+def _build_bridge(mirror_path: Path, dest_hash: str, *, transient: bool,
+                  cleanup_paths: list[Path]) -> Path:
+    """Build/refresh the dest-hash bridge repo from the source mirror.
+
+    Returns the bridge repo path to push from. Bridge repo + marks live beside
+    the mirror so a persistent cache makes re-syncs incremental; in transient
+    mode they're registered for cleanup.
+    """
+    bridge_path = Path(str(mirror_path) + f".bridge-{dest_hash}")
+    marks_src = Path(str(mirror_path) + ".bridge-src.marks")
+    marks_dst = Path(str(mirror_path) + ".bridge-dst.marks")
+    if transient:
+        cleanup_paths += [bridge_path, marks_src, marks_dst]
+
+    # If a previous bridge used a different hash, rebuild from scratch.
+    if is_bare_mirror(bridge_path) and repo_object_format(bridge_path) != dest_hash:
+        logging.info("Bridge hash changed; rebuilding bridge repo.")
+        shutil.rmtree(bridge_path, ignore_errors=True)
+        marks_src.unlink(missing_ok=True)
+        marks_dst.unlink(missing_ok=True)
+
+    ensure_bridge_repo(bridge_path, dest_hash)
+    # Marks must stay consistent with the bridge's actual contents: only resume
+    # incrementally when the bridge already has history AND both marks exist.
+    incremental = (_has_any_refs(bridge_path)
+                   and marks_src.exists() and marks_dst.exists())
+    if not incremental:
+        marks_src.unlink(missing_ok=True)
+        marks_dst.unlink(missing_ok=True)
+    bridge_history(mirror_path, bridge_path, marks_src, marks_dst,
+                   incremental=incremental)
+    return bridge_path
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +728,20 @@ dest   = "git@backup.example.com:me/big-repo.git"
 local  = "~/.cache/git-sync/big-repo"
 mirror = true        # WARNING: destructive on destination
 force  = true
+
+# Cross-hash sync: a SHA-256 Gitea repo mirrored to a SHA-1 GitHub repo.
+# When source_hash != dest_hash, history is re-streamed (fast-export|import)
+# into the destination's hash. NOTE: commit IDs change and signatures are
+# stripped — it's a re-created history, not a byte-identical mirror. Needs a
+# persistent local cache to keep the re-sync incremental.
+[jobs.gitea-to-github]
+source       = "https://gitea.local/me/project.git"
+dest         = "https://github.com/me/project.git"
+local        = "~/.cache/git-sync/project"
+all_branches = true
+source_hash  = "sha256"   # your internal Gitea
+dest_hash    = "sha1"     # GitHub (only supports sha1)
+dest_token   = "${GITHUB_TOKEN}"
 '''
 
 
@@ -559,6 +751,7 @@ _VALID_JOB_KEYS = {
     "all_branches", "branches", "mirror",
     "tags", "force", "ssh_key",
     "token", "source_token", "dest_token", "token_user",
+    "source_hash", "dest_hash",
 }
 
 
@@ -648,6 +841,14 @@ def run_job(name: str, params: dict, *, force_override: bool, dry_run: bool, no_
     dest_token = expand_env(params.get("dest_token"), field=f"jobs.{name}.dest_token") or shared_token
     token_user = expand_env(params.get("token_user"), field=f"jobs.{name}.token_user")
 
+    source_hash = params.get("source_hash")
+    dest_hash = params.get("dest_hash")
+    for key, val in (("source_hash", source_hash), ("dest_hash", dest_hash)):
+        if val is not None and val not in VALID_HASHES:
+            raise RuntimeError(
+                f"Job '{name}': '{key}' must be one of {sorted(VALID_HASHES)}, got {val!r}."
+            )
+
     transient = bool(params.get("transient", False))
     if transient and local:
         raise RuntimeError(f"Job '{name}': 'transient' and 'local' are mutually exclusive.")
@@ -686,6 +887,8 @@ def run_job(name: str, params: dict, *, force_override: bool, dry_run: bool, no_
         source_token=source_token,
         dest_token=dest_token,
         token_user=token_user,
+        source_hash=source_hash,
+        dest_hash=dest_hash,
     )
 
 
@@ -728,6 +931,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--source-token", help="Token for the source remote only (overrides --token).")
     p.add_argument("--dest-token", help="Token for the destination remote only (overrides --token).")
     p.add_argument("--token-user", help="Username paired with the token (default: oauth2).")
+    p.add_argument("--source-hash", choices=sorted(VALID_HASHES),
+                   help="Object hash of the source repo. Set with --dest-hash when "
+                        "they differ to bridge SHA-1<->SHA-256 (re-creates history).")
+    p.add_argument("--dest-hash", choices=sorted(VALID_HASHES),
+                   help="Object hash of the destination repo (see --source-hash).")
 
     # Behavioural flags (apply in both modes; in config mode they override jobs)
     p.add_argument("--no-tags", action="store_true",
@@ -762,6 +970,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         if args.source_token: offending.append("--source-token")
         if args.dest_token: offending.append("--dest-token")
         if args.token_user: offending.append("--token-user")
+        if args.source_hash: offending.append("--source-hash")
+        if args.dest_hash: offending.append("--dest-hash")
         if offending:
             p.error(
                 "When using --config, do not also pass " + ", ".join(offending)
@@ -849,6 +1059,8 @@ def main(argv: list[str] | None = None) -> int:
             dest_token=(expand_env(args.dest_token, field="--dest-token")
                         or expand_env(args.token, field="--token")),
             token_user=expand_env(args.token_user, field="--token-user"),
+            source_hash=args.source_hash,
+            dest_hash=args.dest_hash,
         )
     except subprocess.CalledProcessError as e:
         logging.error("git failed (exit %d): %s", e.returncode, " ".join(e.cmd))

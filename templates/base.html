@@ -461,6 +461,27 @@
   .force-pop .force-check input { margin-top: 0.15rem; }
   .btn[disabled] { opacity: 0.45; cursor: not-allowed; }
   .btn[disabled]:hover { background: transparent; border-color: var(--border); }
+
+  /* === Split button + dropdown menu (save-and-run) ===================== */
+  .split-btn { display: inline-flex; align-items: stretch; }
+  .split-btn > .btn:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+  .split-btn details.dropdown { position: relative; display: inline-block; }
+  .split-btn summary.split-caret {
+    list-style: none; cursor: pointer;
+    border-top-left-radius: 0; border-bottom-left-radius: 0;
+    border-left: 1px solid rgba(0,0,0,.25); margin-left: -1px;
+    padding-left: 0.6rem; padding-right: 0.6rem;
+  }
+  summary.split-caret::-webkit-details-marker { display: none; }
+  summary.split-caret::marker { content: ""; }
+  .dropdown-menu {
+    position: absolute; right: 0; margin-top: 0.4rem; z-index: 30;
+    display: flex; flex-direction: column; gap: 0.35rem;
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.5rem; min-width: 200px;
+    box-shadow: 0 6px 22px rgba(0,0,0,.45);
+  }
+  .dropdown-menu .btn { text-align: left; white-space: nowrap; }
 </style>
 </head>
 <body>

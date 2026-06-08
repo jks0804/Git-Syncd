@@ -641,4 +641,6 @@ Either upgrade Python, install `tomli` (`pip install tomli`), or convert your co
 
 ## License
 
-MIT (or substitute your preferred license here).
+GNU General Public License v3.0 or later (GPL-3.0-or-later). See the [LICENSE](LICENSE) file for the full text.
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GPL as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY.

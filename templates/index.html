@@ -8,6 +8,18 @@
     <span class="subtitle">{{ jobs|length }} configured · click "run" to execute</span>
   </h2>
   <div class="actions-bar">
+    {% if jobs %}
+    <form method="post" action="{{ url_for('run_all_view') }}" class="inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}">
+      <input type="hidden" name="dry_run" value="on">
+      <button type="submit" class="btn" title="Preview every job without pushing">dry-run all</button>
+    </form>
+    <form method="post" action="{{ url_for('run_all_view') }}" class="inline"
+          onsubmit="return confirm('Run all {{ jobs|length }} job(s) now?')">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}">
+      <button type="submit" class="btn" title="Run every job in order">run all</button>
+    </form>
+    {% endif %}
     <a href="{{ url_for('new_job') }}" class="btn btn-primary">+ New job</a>
   </div>
 </div>

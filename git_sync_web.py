@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 stroh <jstroh@ltgc.com>
+#
+# This program is free software: you can redistribute it and/or modify it under
+# the terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later
+# version. This program is distributed WITHOUT ANY WARRANTY; see the GNU
+# General Public License (LICENSE file) for more details.
 """
 git_sync_web.py — Web interface for managing git_sync configurations.
 
@@ -74,6 +82,7 @@ VALID_JOB_KEYS = {
     "all_branches", "branches", "mirror",
     "tags", "force", "ssh_key",
     "token", "source_token", "dest_token", "token_user",
+    "source_hash", "dest_hash",
 }
 
 # How long to wait on a sync subprocess before giving up.
@@ -134,6 +143,17 @@ def parse_job_form(form) -> dict:
         raise ValueError("Destination URL is required.")
     job["source"] = source
     job["dest"] = dest
+
+    # Object-hash of each end. When they differ, git_sync bridges SHA-1<->SHA-256
+    # via fast-export|import (re-creates history). Default sha1 (most compatible);
+    # only store when set so same-hash jobs stay on the plain mirror-push path.
+    source_hash = form.get("source_hash", "sha1")
+    dest_hash = form.get("dest_hash", "sha1")
+    for label, val in (("source", source_hash), ("destination", dest_hash)):
+        if val not in ("sha1", "sha256"):
+            raise ValueError(f"Invalid {label} hash '{val}': choose sha1 or sha256.")
+    job["source_hash"] = source_hash
+    job["dest_hash"] = dest_hash
 
     storage = form.get("storage", "")
     if storage == "local":
@@ -240,6 +260,8 @@ def form_to_display_dict(form) -> dict:
         "source_token": form.get("source_token", ""),
         "dest_token": form.get("dest_token", ""),
         "token_user": form.get("token_user", ""),
+        "source_hash": form.get("source_hash", "sha1"),
+        "dest_hash": form.get("dest_hash", "sha1"),
         "branches": form.get("branches", ""),  # keep as string for redisplay
         "all_branches": form.get("selector") == "all_branches",
         "mirror": form.get("selector") == "mirror",
@@ -275,12 +297,15 @@ def is_valid_job_name(name: str) -> bool:
 # Subprocess: run a sync
 # ---------------------------------------------------------------------------
 
-def run_sync(job_name: str, dry_run: bool = False, force: bool = False) -> tuple[int, str]:
-    """Invoke git_sync.py for one job. Returns (returncode, combined_output).
+def run_sync(job_name: str | None, dry_run: bool = False, force: bool = False) -> tuple[int, str]:
+    """Invoke git_sync.py. Returns (returncode, combined_output).
+
+    job_name=None runs *every* job in the config (omits --job); git_sync runs
+    them in order, logs per-job failures, and exits non-zero if any failed.
 
     force=True adds --force, which overrides the job's own setting for this run
-    only (git_sync applies --force to the job in config mode). This is the
-    destructive overwrite the web "danger zone" gates behind a confirmation.
+    only (git_sync applies --force in config mode). This is the destructive
+    overwrite the web "danger zone" gates behind a confirmation.
     """
     if not SYNC_SCRIPT.is_file():
         return 127, f"git_sync.py not found at {SYNC_SCRIPT}"
@@ -289,25 +314,28 @@ def run_sync(job_name: str, dry_run: bool = False, force: bool = False) -> tuple
         sys.executable,
         str(SYNC_SCRIPT),
         "--config", str(CONFIG_PATH),
-        "--job", job_name,
     ]
+    if job_name is not None:
+        cmd += ["--job", job_name]
     if dry_run:
         cmd.append("--dry-run")
     if force:
         cmd.append("--force")
 
+    # Running every job can take longer than a single one; scale the timeout.
+    timeout = SYNC_TIMEOUT_SECONDS if job_name is not None else SYNC_TIMEOUT_SECONDS * 4
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=SYNC_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
         # git_sync logs to stderr; stdout is mostly empty. Combine for display.
         combined = (result.stdout or "") + (result.stderr or "")
         return result.returncode, combined.strip() or "(no output)"
     except subprocess.TimeoutExpired:
-        return 124, f"Sync timed out after {SYNC_TIMEOUT_SECONDS} seconds."
+        return 124, f"Sync timed out after {timeout} seconds."
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +425,24 @@ def index():
     )
 
 
+def _after_save_response(name: str):
+    """Honor the form's split-button choice after a successful save.
+
+    after_save == 'run'      -> save then run the job, show its result
+    after_save == 'dry_run'  -> save then dry-run the job, show its result
+    anything else            -> back to the dashboard
+    """
+    action = request.form.get("after_save", "")
+    if action in ("run", "dry_run"):
+        dry = action == "dry_run"
+        rc, output = run_sync(name, dry_run=dry)
+        return render_template(
+            "run_result.html",
+            name=name, dry_run=dry, force=False, returncode=rc, output=output,
+        )
+    return redirect(url_for("index"))
+
+
 @app.route("/jobs/new", methods=["GET", "POST"])
 @require_auth
 def new_job():
@@ -415,7 +461,7 @@ def new_job():
             config["jobs"][name] = job
             save_config(config)
             flash(f"Job '{name}' created.", "success")
-            return redirect(url_for("index"))
+            return _after_save_response(name)
         except ValueError as e:
             flash(str(e), "error")
             return render_template(
@@ -456,7 +502,7 @@ def edit_job(name):
             config["jobs"][name] = job
             save_config(config)
             flash(f"Job '{name}' updated.", "success")
-            return redirect(url_for("index"))
+            return _after_save_response(name)
         except ValueError as e:
             flash(str(e), "error")
             return render_template(
@@ -512,6 +558,27 @@ def run_job_view(name):
         name=name,
         dry_run=dry_run,
         force=force,
+        returncode=rc,
+        output=output,
+    )
+
+
+@app.route("/jobs/run-all", methods=["POST"])
+@require_auth
+def run_all_view():
+    check_csrf()
+    config = load_config()
+    if not config["jobs"]:
+        flash("No jobs to run.", "error")
+        return redirect(url_for("index"))
+    dry_run = request.form.get("dry_run") == "on"
+    rc, output = run_sync(None, dry_run=dry_run)
+    return render_template(
+        "run_result.html",
+        name="all jobs",
+        all_jobs=True,
+        dry_run=dry_run,
+        force=False,
         returncode=rc,
         output=output,
     )

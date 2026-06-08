@@ -36,13 +36,31 @@
              placeholder="git@github.com:me/repo.git">
     </label>
     <label class="field">
+      <span class="label">Source object hash</span>
+      <select name="source_hash">
+        <option value="sha1"   {% if job.source_hash != 'sha256' %}selected{% endif %}>SHA-1 — most compatible (GitHub, GitLab, classic git)</option>
+        <option value="sha256" {% if job.source_hash == 'sha256' %}selected{% endif %}>SHA-256 — e.g. modern Gitea</option>
+      </select>
+    </label>
+    <label class="field">
       <span class="label">Destination URL</span>
       <input type="text" name="dest" value="{{ job.dest or '' }}" required
              placeholder="git@gitlab.com:me/repo.git">
+    </label>
+    <label class="field">
+      <span class="label">Destination object hash</span>
+      <select name="dest_hash">
+        <option value="sha1"   {% if job.dest_hash != 'sha256' %}selected{% endif %}>SHA-1 — most compatible (GitHub, GitLab, classic git)</option>
+        <option value="sha256" {% if job.dest_hash == 'sha256' %}selected{% endif %}>SHA-256 — e.g. modern Gitea</option>
+      </select>
       <p class="help">
-        SSH (<code>git@host:me/repo.git</code>) or HTTPS (<code>https://host/me/repo.git</code>).
-        Both fields support <code>${VAR}</code> environment-variable substitution at sync time.
-        For HTTPS auth, use the access-token fields below rather than embedding credentials in the URL.
+        URLs may be SSH (<code>git@host:me/repo.git</code>) or HTTPS (<code>https://host/me/repo.git</code>),
+        and support <code>${VAR}</code> substitution. For HTTPS auth, use the access-token fields below.
+        <br>
+        Leave both hashes the same for a normal exact mirror. When they <strong>differ</strong>
+        (e.g. SHA-256 Gitea → SHA-1 GitHub), history is re-streamed into the destination's hash —
+        <strong>commit IDs change and signatures are stripped</strong>; use a persistent local cache
+        so re-syncs stay incremental.
       </p>
     </label>
   </fieldset>
@@ -178,7 +196,16 @@
   </fieldset>
 
   <div class="form-actions">
-    <button type="submit" class="btn btn-primary">{{ action_label }}</button>
+    <div class="split-btn">
+      <button type="submit" class="btn btn-primary">{{ action_label }}</button>
+      <details class="dropdown">
+        <summary class="btn btn-primary split-caret" title="Save and run">▾</summary>
+        <div class="dropdown-menu">
+          <button type="submit" name="after_save" value="dry_run" class="btn">{{ action_label }} &amp; dry-run</button>
+          <button type="submit" name="after_save" value="run" class="btn">{{ action_label }} &amp; run</button>
+        </div>
+      </details>
+    </div>
     <a href="{{ url_for('index') }}" class="btn">Cancel</a>
   </div>
 </form>

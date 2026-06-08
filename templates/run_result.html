@@ -22,24 +22,25 @@
 
 <pre class="output">{{ output }}</pre>
 
+{% set run_action = url_for('run_all_view') if all_jobs else url_for('run_job_view', name=name) %}
 <div class="form-actions" style="border-top: none; padding-top: 0.5rem;">
-  <form method="post" action="{{ url_for('run_job_view', name=name) }}" class="inline">
+  <form method="post" action="{{ run_action }}" class="inline">
     <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}">
     {% if dry_run %}<input type="hidden" name="dry_run" value="on">{% endif %}
     {% if force %}<input type="hidden" name="force" value="on">{% endif %}
-    <button type="submit" class="btn btn-primary">run again {% if dry_run %}(dry){% endif %}{% if force %} (forced){% endif %}</button>
+    <button type="submit" class="btn btn-primary">run {% if all_jobs %}all {% endif %}again {% if dry_run %}(dry){% endif %}{% if force %} (forced){% endif %}</button>
   </form>
   {% if dry_run and returncode == 0 %}
-  <form method="post" action="{{ url_for('run_job_view', name=name) }}" class="inline">
+  <form method="post" action="{{ run_action }}" class="inline">
     <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}">
     {% if force %}<input type="hidden" name="force" value="on">{% endif %}
-    <button type="submit" class="btn">run for real{% if force %} (forced){% endif %}</button>
+    <button type="submit" class="btn">run {% if all_jobs %}all {% endif %}for real{% if force %} (forced){% endif %}</button>
   </form>
   {% endif %}
-  <a href="{{ url_for('edit_job', name=name) }}" class="btn">edit job</a>
+  {% if not all_jobs %}<a href="{{ url_for('edit_job', name=name) }}" class="btn">edit job</a>{% endif %}
 </div>
 
-{% if returncode != 0 and not force %}
+{% if returncode != 0 and not force and not all_jobs %}
 <div class="force-pop" style="max-width: 560px; margin-top: 1.25rem;">
   <p class="force-title">⚠ Danger zone — force-push</p>
   <p class="help" style="margin-top: 0;">
