@@ -97,7 +97,7 @@
 <p class="footer-note">
   defaults active:
   {% for key, val in defaults.items() %}
-    <code>{{ key }}={{ val|lower if val is boolean else val }}</code>{% if not loop.last %}, {% endif %}
+    <code>{{ key }}={% if key in ['token', 'source_token', 'dest_token'] %}••••{% elif val is boolean %}{{ val|lower }}{% else %}{{ val }}{% endif %}</code>{% if not loop.last %}, {% endif %}
   {% endfor %}
 </p>
 {% endif %}

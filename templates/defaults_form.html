@@ -39,6 +39,40 @@
     </p>
   </fieldset>
 
+  <fieldset>
+    <legend>Default access tokens</legend>
+    <label class="field">
+      <span class="label">HTTPS access token <span class="muted">(optional)</span></span>
+      <input type="text" name="token" value="{{ defaults.token or '' }}"
+             placeholder="ghp_… or ${GITHUB_TOKEN}" autocomplete="off">
+      <p class="help">
+        Applies to both source and destination of every job that doesn't set its own token.
+        May be a literal token or a <code>${VAR}</code> reference. Use the per-end fields below
+        when source and destination need different tokens.
+      </p>
+    </label>
+    <label class="field">
+      <span class="label">Source token <span class="muted">(optional, overrides above)</span></span>
+      <input type="text" name="source_token" value="{{ defaults.source_token or '' }}"
+             placeholder="${SRC_TOKEN}" autocomplete="off">
+    </label>
+    <label class="field">
+      <span class="label">Destination token <span class="muted">(optional, overrides above)</span></span>
+      <input type="text" name="dest_token" value="{{ defaults.dest_token or '' }}"
+             placeholder="${DEST_TOKEN}" autocomplete="off">
+    </label>
+    <label class="field">
+      <span class="label">Token username <span class="muted">(optional)</span></span>
+      <input type="text" name="token_user" value="{{ defaults.token_user or '' }}"
+             placeholder="oauth2" autocomplete="off">
+      <p class="help">Username paired with the token. Defaults to <code>oauth2</code>. GitHub accepts any non-empty value; GitLab expects <code>oauth2</code>.</p>
+    </label>
+    <p class="help">
+      A job's own token fields (set on its edit page) override these. Leave a job's token
+      blank to inherit the default set here.
+    </p>
+  </fieldset>
+
   <div class="form-actions">
     <button type="submit" class="btn btn-primary">Save defaults</button>
     <a href="{{ url_for('index') }}" class="btn">Cancel</a>

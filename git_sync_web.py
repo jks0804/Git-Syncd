@@ -206,6 +206,23 @@ def parse_defaults_form(form) -> dict:
         defaults["tags"] = False  # checkbox means "skip by default"
     if form.get("force_default") == "on":
         defaults["force"] = True
+
+    # Shared default tokens. Same keys a job uses; git_sync merges defaults
+    # under each job ({**defaults, **job}), so a job's own token always wins
+    # and a job that leaves a token blank falls back to these.
+    token = form.get("token", "").strip()
+    source_token = form.get("source_token", "").strip()
+    dest_token = form.get("dest_token", "").strip()
+    token_user = form.get("token_user", "").strip()
+    if token:
+        defaults["token"] = token
+    if source_token:
+        defaults["source_token"] = source_token
+    if dest_token:
+        defaults["dest_token"] = dest_token
+    if token_user:
+        defaults["token_user"] = token_user
+
     return defaults
 
 
